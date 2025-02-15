@@ -1,24 +1,12 @@
 import chars
 from PIL import Image
 import os
-import random   # <-- Added to support deterministic random behavior
+import random
+import concurrent.futures
 
-def visualizeInTerminalForDebug():
-    for char, grid in chars.chars.items():
-        print(f"Character: '{char}'")
-        # Each character is defined on an 8x6 grid.
-        for row in range(8):
-            # Slice out each row's data from our grid data.
-            row_data = grid[row * 6:(row + 1) * 6]
-            # If the cell is 1, print a black cell; if 0, print a white cell.
-            line = ''.join("█" if pixel == 1 else " " for pixel in row_data)
-            print(line)
-        print()  # Add an empty line between characters
-
-# This function uses a deterministic random (by setting a fixed seed)
-# to select 18 characters (6 per row, 3 rows). It combines their 8x6 grids
-# into one single collage image and saves it as a BMP file.
-def generate_random_collage(filename="ascii_collage.bmp", seed=42):
+# Generate a collage of randomly selected ASCII characters (6 columns and 3 rows)
+# using a deterministic random seed. The resulting collage is saved to a BMP file.
+def generate_random_collage(filename, seed):
     random.seed(seed)
     ascii_keys = list(chars.chars.keys())
     # Pick 18 characters (6 columns x 3 rows)
@@ -41,17 +29,18 @@ def generate_random_collage(filename="ascii_collage.bmp", seed=42):
                 if grid[r * 6 + c] == 1:
                     collage.putpixel((x_offset + c, y_offset + r), 0)
     collage.save(filename, "BMP")
-    print(f"Saved collage to {filename}")
-
-# draws a collage of 6x3 randomly (but deterministically) selected characters.
-def visualizeForDebug():
-    """
-    Generate a collage of randomly selected ASCII characters (6 columns and 3 rows)
-    using a deterministic random seed. The resulting collage is saved to a BMP file.
-    """
-    generate_random_collage(filename="ascii_collage.bmp")
 
 if __name__ == "__main__":
-    # visualizeInTerminalForDebug()
-    # The refactored version now creates one collage image.
-    visualizeForDebug()
+    os.makedirs("train_ascii", exist_ok=True)
+
+    # Use a ProcessPoolExecutor to parallelize the generation of 400 images.
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # Submit tasks for indices 0 to 399
+        futures = [
+            executor.submit(generate_random_collage, filename=f"train_ascii/image_{index}.bmp", seed=index)
+            for index in range(400)
+        ]
+        # Wait for all tasks to complete.
+        concurrent.futures.wait(futures)
+
+    print("Finished generating 400 images.")
