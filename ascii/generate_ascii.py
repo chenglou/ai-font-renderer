@@ -4,6 +4,10 @@ import os
 import random
 import concurrent.futures
 
+# This script is used exclusively for generating a collage of random ASCII character images
+# (using the custom font in chars.py) which can be used as training data or for visualization.
+# It does not perform any model training.
+
 # Generate a collage of randomly selected ASCII characters (6 columns and 3 rows)
 # using a deterministic random seed. The resulting collage is saved to a BMP file.
 def generate_random_collage(filename, seed):
