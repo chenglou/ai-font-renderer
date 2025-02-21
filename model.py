@@ -1,54 +1,98 @@
+# Goal: Map one ASCII character to its 8x6 bitmap.
+
+# Data Preparation:
+# Create a dataset where each input is an ASCII character (integer 0–127), and the output is its 8x6 bitmap (flattened to 48 binary pixels).
+# Use your custom font to generate these bitmaps.
+# Model Architecture:
+# Input: One-hot encoded ASCII character (shape = (128,)).
+# Layers:
+# Dense(64, activation='relu')
+# Dense(48, activation='sigmoid') (output layer).
+# Loss: BinaryCrossentropy (each pixel is a binary classification).
+# Training:
+# Train until loss nears zero (exact reconstruction is possible here).
+# Test with characters like 'A', 'B', etc., to validate.
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # <-- import functional for one_hot
+import torch.optim as optim
+import torch.utils.data as data
 
-class TextToImage(nn.Module):
-    def __init__(self, vocab_size, emb_dim, nhead, num_layers, latent_dim, image_width, image_height):
-        """
-        vocab_size  : number of tokens (e.g., 256 for ASCII)
-        emb_dim     : desired embedding dimension (if different from vocab_size, a projection is applied)
-        nhead       : number of heads in transformer encoder
-        num_layers  : number of transformer encoder layers
-        latent_dim  : size of the intermediate latent vector (after aggregation)
-        image_width : desired width of generated image
-        image_height: desired height of generated image
-        """
-        super(TextToImage, self).__init__()
-        self.image_width = image_width
-        self.image_height = image_height
-        self.vocab_size = vocab_size   # store vocab_size for one-hot conversion
-        self.emb_dim = emb_dim          # store emb_dim for forward pass usage
+import chars  # using the custom font from ascii/chars.py
 
-        # Instead of a learned nn.Embedding, we use a fixed one-hot encoding.
-        # Optionally, if emb_dim is not equal to vocab_size, add a fixed projection.
-        if emb_dim != vocab_size:
-            self.proj = nn.Linear(vocab_size, emb_dim)
-        else:
-            self.proj = None
-
-        # Transformer encoder expects an input dimension of emb_dim.
-        encoder_layer = nn.TransformerEncoderLayer(d_model=emb_dim, nhead=nhead)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        # MLP that processes the aggregated transformer output to generate image pixels.
-        self.fc = nn.Sequential(
-            nn.Linear(emb_dim, latent_dim),
-            nn.ReLU(),
-            nn.Linear(latent_dim, image_width * image_height)  # flatten image pixels
-        )
+# Define the network: one hidden layer with ReLU and an output layer with Sigmoid.
+class AsciiModel(nn.Module):
+    def __init__(self):
+        super(AsciiModel, self).__init__()
+        self.fc1 = nn.Linear(128, 48)
 
     def forward(self, x):
-        # x: (batch_size, seq_length) with ASCII values
-        # Convert directly to float and normalize (values between 0 and 1)
-        x = x.float() / 255.0  # normalization might help training
-        # Make it (batch_size, seq_length, 1)
-        x = x.unsqueeze(-1)
-        # To match the transformer d_model, duplicate the value across emb_dim dimensions
-        x = x.repeat(1, 1, self.emb_dim)
-        x = x.transpose(0, 1)  # shape: (seq_length, batch_size, emb_dim)
-        # Then proceed with transformer and the rest of the model as before.
-        encoded = self.transformer_encoder(x)
-        aggregated = encoded.mean(dim=0)
-        img_flat = self.fc(aggregated)
-        img = img_flat.view(-1, 1, self.image_height, self.image_width)
-        return img
+        x = torch.sigmoid(self.fc1(x))
+        return x
+
+# Create a dataset based on the custom font.
+# For each character in chars, the input is a one-hot vector (length 128)
+# and the target is its 8x6 bitmap (flattened into 48 binary values).
+def create_dataset():
+    inputs = []
+    targets = []
+    for char, bitmap in chars.chars.items():
+        one_hot = [0] * 128
+        one_hot[ord(char)] = 1  # set the position corresponding to the ASCII code
+        inputs.append(one_hot)
+        targets.append(bitmap)
+    inputs_tensor = torch.tensor(inputs, dtype=torch.float32)
+    targets_tensor = torch.tensor(targets, dtype=torch.float32)
+    return data.TensorDataset(inputs_tensor, targets_tensor)
+
+# Simple training loop using the entire dataset as a single batch.
+def train_model(model, dataset, num_epochs=10000, lr=0.01):
+    dataloader = data.DataLoader(dataset, batch_size=len(dataset), shuffle=True)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(num_epochs):
+        for batch_inputs, batch_targets in dataloader:
+            optimizer.zero_grad()
+            outputs = model(batch_inputs)
+            loss = criterion(outputs, batch_targets)
+            loss.backward()
+            optimizer.step()
+
+        if epoch % 1000 == 0:
+            print(f"Epoch {epoch}, Loss: {loss.item()}")
+        if loss.item() < 1e-4:
+            print(f"Converged at epoch {epoch}, Loss: {loss.item()}")
+            break
+    return model
+
+# Helper function to print the 8x6 bitmap.
+def print_bitmap(bitmap):
+    # bitmap is expected to be a flat list or 1D tensor of length 48.
+    for i in range(8):
+        row = bitmap[i * 6:(i + 1) * 6]
+        if isinstance(row, torch.Tensor):
+            row = row.detach().cpu().numpy().tolist()
+        # Use '#' for "on" pixels (>= 0.5) and ' ' for "off".
+        line = ''.join(['#' if p >= 0.5 else ' ' for p in row])
+        print(line)
+
+if __name__ == '__main__':
+    # Build the dataset and create the model.
+    dataset = create_dataset()
+    model = AsciiModel()
+
+    print("Training model...")
+    model = train_model(model, dataset)
+
+    # Test the trained model with some characters.
+    print("\nTesting the model:")
+    test_chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', ' ']
+    for ch in test_chars:
+        one_hot = [0] * 128
+        one_hot[ord(ch)] = 1
+        x = torch.tensor(one_hot, dtype=torch.float32).unsqueeze(0)
+        pred = model(x).squeeze()  # shape (48,)
+        print(f"\nCharacter: {ch}")
+        print_bitmap(pred)
+

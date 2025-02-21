@@ -35,13 +35,13 @@ def generate_random_collage(filename, seed):
     collage.save(filename, "BMP")
 
 if __name__ == "__main__":
-    os.makedirs("train_ascii", exist_ok=True)
+    os.makedirs("train_data", exist_ok=True)
 
     # Use a ProcessPoolExecutor to parallelize the generation of 400 images.
     with concurrent.futures.ProcessPoolExecutor() as executor:
         # Submit tasks for indices 0 to 399
         futures = [
-            executor.submit(generate_random_collage, filename=f"train_ascii/image_{index}.bmp", seed=index)
+            executor.submit(generate_random_collage, filename=f"train_data/image_{index}.bmp", seed=index)
             for index in range(400)
         ]
         # Wait for all tasks to complete.
