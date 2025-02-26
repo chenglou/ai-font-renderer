@@ -1,0 +1,7 @@
+Some learnings from my ascii neural renderer, finished at of this diff
+- Had 3 layers: one-hot (dimension 128), hidden layer (dimension 64), then output is bitmap 1 & 0 (dimension 48, 8x6 grid). Zeroed a char’s one-hot during training but still perfect. Realized the bias from the hidden layer perfected retained all the info (Wx + b where x is all 0). Removed that bias, still perfect, because of bias on the output layer. Removed that and finally output for that char’s funky looking. I like this self-repairing thing from a neural net. Most self-healing architectures in traditional programming are either low level (tcp retries) or super complex (distributed system) or tedious (data migration/skew)
+- Made two chars have the same one-hot encoding. Funky output ofc
+- Tried with a nonexistent one-hot vector (random char that isn’t part of the training data). Outputs roughly a B because it’s what’s shared between most ascii chars
+- Learned about some PyTorch internals and revisited some much needed linear algebra. If I don’t need torch’s flexibility I think it’s pretty easy to beat it with a compute shader
+- Tinkered with the hidden layer size til I realized dim 5 works but dim 4 doesn’t. Then realized I train on 27 distinct chars (a-Z and space) and 2^4<27<2^5 aka 5 bits needed to represent each char. But one-hot encoding represents a char. So I removed the entire hidden layer. Soon I’ll change the one hot encoding to this 5 bits representation, which is literally just the binary integer representation of a char
+- Tried some visualization tools
