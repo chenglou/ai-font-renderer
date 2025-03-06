@@ -6,5 +6,7 @@ This repo tries to render font by fitting a neural net.
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python model.py
+python model.py --train
 ```
+
+Output's in `train_test/`
