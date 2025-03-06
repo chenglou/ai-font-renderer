@@ -4,14 +4,26 @@ This file implements an attention-based neural network for rendering ASCII text 
 The model uses self-attention mechanisms that allow characters to influence each other's rendering,
 creating a more coherent font appearance across a string. It includes a complete pipeline for:
 - Training a neural font renderer on ASCII characters
-- Rendering text strings as bitmap images (both console output and BMP files)
+- Rendering text strings as bitmap images
 - Saving and loading trained models
 
 Usage:
   - Run with --train flag to train a new model: python model.py --train
+  - Run with --generate-samples flag to create sample training data: python model.py --generate-samples
   - Run without arguments to load a saved model and render sample strings: python model.py
 
-The model renders characters as 8x6 bitmaps and supports sequences up to 25 characters long.
+Architecture learnings:
+  - Multiple attention layers (2) seem to perform better than a single layer
+  - Sufficient training data (2000+ samples) is crucial for good results
+  - Focal loss works better than standard BCE loss for this task
+  - Early stopping based on validation helps prevent overfitting
+  - A balanced model size with moderate embedding dimensions (80) works well
+  - Both validation and regularization are important for generalization
+
+These observations are based on experimentation with this specific task and dataset.
+Different font styles or character sets might require different approaches.
+
+The model supports sheet-based rendering with a fixed output size (40x120 pixels by default).
 """
 
 import torch
@@ -33,25 +45,42 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Sequence model using attention for string rendering
+# Hybrid model - balanced complexity with effective components from successful model
 class AttentionFontRenderer(nn.Module):
-    def __init__(self, max_length=20):
+    def __init__(self, max_length=100, sheet_height=40, sheet_width=120):
         super().__init__()
         self.max_length = max_length
+        self.sheet_height = sheet_height
+        self.sheet_width = sheet_width
+        self.sheet_size = sheet_height * sheet_width
 
-        # Character embedding
-        self.embedding = nn.Embedding(128, 64)  # ASCII codes to embeddings
-
-        # Initialize positional encoding with fixed random seed
-        generator = torch.Generator().manual_seed(SEED)
-        self.positional_encoding = nn.Parameter(torch.randn(max_length, 64, generator=generator))
-
-        # Self-attention layer
-        self.self_attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
-
-        # Processing after attention
-        self.fc1 = nn.Linear(64, 96)
-        self.fc2 = nn.Linear(96, 48)  # 48 = 8×6 bitmap
+        # Moderate sized embedding 
+        self.embedding = nn.Embedding(128, 80)  # Balanced size
+        self.embedding_dropout = nn.Dropout(0.1)
+        
+        # Positional encoding
+        self.positional_encoding = nn.Parameter(torch.zeros(max_length, 80))
+        nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
+        
+        # Two attention layers (key to success) but with moderate complexity
+        self.attention_layers = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=80, num_heads=4, dropout=0.1)
+            for _ in range(2)  # Keep two layers which worked well
+        ])
+        
+        # Layer normalization
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(80)
+            for _ in range(2)
+        ])
+        
+        # Balanced processing network - three layers with moderate width
+        self.fc1 = nn.Linear(80, 160)
+        self.dropout1 = nn.Dropout(0.15)
+        self.fc2 = nn.Linear(160, 256)
+        self.dropout2 = nn.Dropout(0.15)
+        self.fc3 = nn.Linear(256 * max_length, self.sheet_size)
+        
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
 
@@ -63,124 +92,287 @@ class AttentionFontRenderer(nn.Module):
         seq_len = min(seq_len, self.max_length)
         x = x[:, :seq_len]
 
-        # Embed the input characters
-        embedded = self.embedding(x)  # [batch_size, seq_len, 64]
+        # Embed the input characters with dropout
+        embedded = self.embedding(x)  # [batch_size, seq_len, 80]
+        embedded = self.embedding_dropout(embedded)
 
         # Add positional encoding
         positions = self.positional_encoding[:seq_len, :].unsqueeze(0)
         embedded = embedded + positions
+        
+        # Apply stacked attention layers with residual connections
+        attn_output = embedded
+        for i, (attention, norm) in enumerate(zip(self.attention_layers, self.layer_norms)):
+            # Transpose for attention
+            attn_input = attn_output.transpose(0, 1)  # [seq_len, batch_size, 80]
+            
+            # Self-attention with residual connection
+            attn_result, _ = attention(attn_input, attn_input, attn_input)
+            attn_result = attn_result.transpose(0, 1)  # [batch_size, seq_len, 80]
+            
+            # Add residual connection and normalize
+            attn_output = norm(attn_output + attn_result)
+        
+        # Process through fully connected layers with dropout
+        x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 160]
+        x = self.dropout1(x)
+        x = self.activation(self.fc2(x))  # [batch_size, seq_len, 256]
+        x = self.dropout2(x)
+        
+        # Reshape to connect all character features
+        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 256]
+        
+        # Zero-pad if sequence is shorter than max_length
+        if seq_len < self.max_length:
+            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 256, 
+                                device=x.device)
+            x = torch.cat([x, padding], dim=1)
+        
+        # Generate the entire sheet bitmap
+        sheet = self.output_activation(self.fc3(x))  # [batch_size, sheet_size]
+        
+        # Reshape to proper dimensions
+        sheet = sheet.view(batch_size, self.sheet_height, self.sheet_width)  # [batch_size, 40, 120]
 
-        # Self-attention (transpose for nn.MultiheadAttention)
-        attn_input = embedded.transpose(0, 1)  # [seq_len, batch_size, 64]
-        attn_output, _ = self.self_attention(attn_input, attn_input, attn_input)
-        attn_output = attn_output.transpose(0, 1)  # [batch_size, seq_len, 64]
-
-        # Generate bitmaps for each character
-        x = self.activation(self.fc1(attn_output))
-        bitmaps = self.output_activation(self.fc2(x))  # [batch_size, seq_len, 48]
-
-        return bitmaps
+        return sheet
 
 # Generate random strings from the available characters
 def generate_random_string(length):
     available_chars = list(chars.chars.keys())
     return ''.join(random.choice(available_chars) for _ in range(length))
 
-# Create a dataset of strings
-def create_string_dataset(num_samples=1000, min_length=3, max_length=15):
-    inputs = []
-    targets = []
-
+# Create a dataset of text sheets and save sample images to a folder
+def create_string_dataset(num_samples=1000, min_length=20, max_length=100, 
+                         sheet_height=40, sheet_width=120, char_height=8, char_width=6,
+                         save_samples=False, samples_dir="train_input", num_samples_to_save=10):
     # Reset random seed for reproducible dataset generation
     random.seed(SEED)
+    
+    # Calculate how many characters per row and maximum rows
+    chars_per_row = sheet_width // char_width
+    max_rows = sheet_height // char_height
+    
+    # Maximum characters per sheet
+    max_chars_per_sheet = chars_per_row * max_rows
 
-    for _ in range(num_samples):
-        # Generate a random string
-        length = random.randint(min_length, max_length)
+    # Pre-allocate arrays for better performance
+    all_inputs = []
+    all_strings = []  # Store generated strings for reference
+    all_targets = np.zeros((num_samples, sheet_height, sheet_width), dtype=np.float32)
+
+    # Create output directory if saving samples
+    if save_samples:
+        os.makedirs(samples_dir, exist_ok=True)
+        print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
+
+    for sample_idx in range(num_samples):
+        # Generate a random string that fits in the sheet
+        length = random.randint(min_length, min(max_length, max_chars_per_sheet))
         string = generate_random_string(length)
+        all_strings.append(string)
 
         # Convert to ASCII codes
         ascii_codes = [ord(c) for c in string]
-        inputs.append(ascii_codes)
-
-        # Get the bitmap for each character
-        string_bitmaps = []
-        for c in string:
-            string_bitmaps.append(chars.chars[c])
-        targets.append(string_bitmaps)
+        all_inputs.append(ascii_codes)
+        
+        # Position characters in the sheet (monospace layout)
+        char_idx = 0
+        for row in range(max_rows):
+            if char_idx >= len(string):
+                break
+                
+            for col in range(chars_per_row):
+                if char_idx >= len(string):
+                    break
+                    
+                # Get character bitmap
+                char_bitmap = chars.chars[string[char_idx]]
+                
+                # Calculate position in the sheet
+                y_start = row * char_height
+                x_start = col * char_width
+                
+                # Place character bitmap in the sheet
+                for y in range(char_height):
+                    for x in range(char_width):
+                        bitmap_idx = y * char_width + x
+                        if bitmap_idx < len(char_bitmap):  # Safety check
+                            all_targets[sample_idx, y_start + y, x_start + x] = char_bitmap[bitmap_idx]
+                
+                char_idx += 1
+        
+        # Save this sample as an image if requested
+        if save_samples and sample_idx < num_samples_to_save:
+            # Convert binary sheet to image
+            img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
+            for y in range(sheet_height):
+                for x in range(sheet_width):
+                    if all_targets[sample_idx, y, x] >= 0.5:
+                        img[y, x] = 0
+            
+            # Scale up the image for better visibility
+            scale = 4
+            img_scaled = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
+            
+            # Convert to PIL Image and save
+            pil_img = Image.fromarray(img_scaled)
+            filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
+            pil_img.save(filename, "BMP")
+            
+            # Also save the input string for reference
+            with open(f"{samples_dir}/input_{sample_idx}_text.txt", "w") as f:
+                f.write(string)
 
     # Pad sequences to max_length
-    max_len = max(len(s) for s in inputs)
-    padded_inputs = []
-    padded_targets = []
+    max_len = max(len(s) for s in all_inputs)
+    padded_inputs = np.zeros((num_samples, max_len), dtype=np.int64)
 
-    for codes, bitmaps in zip(inputs, targets):
+    for i, codes in enumerate(all_inputs):
         # Pad inputs with zeros
-        padded_input = codes + [0] * (max_len - len(codes))
-        padded_inputs.append(padded_input)
+        padded_inputs[i, :len(codes)] = codes
 
-        # Pad targets with zero bitmaps
-        zero_bitmap = [0] * 48
-        padded_target = bitmaps + [zero_bitmap] * (max_len - len(bitmaps))
-        padded_targets.append(padded_target)
-
+    # Convert to tensors
     inputs_tensor = torch.tensor(padded_inputs, dtype=torch.long)
-    targets_tensor = torch.tensor(padded_targets, dtype=torch.float32)
+    targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
+
+    if save_samples:
+        print(f"Dataset creation complete: {num_samples} samples with dimensions {sheet_height}x{sheet_width}")
 
     return data.TensorDataset(inputs_tensor, targets_tensor)
 
-# Training function for the attention model
-def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32):
-    # Create dataloader with fixed random seed for worker initialization
+# Balanced training function with focal loss and moderate regularization
+def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32,
+                         early_stopping_patience=15, validation_split=0.1):
+    # Split dataset into training and validation
+    dataset_size = len(dataset)
+    val_size = int(validation_split * dataset_size)
+    train_size = dataset_size - val_size
+    train_dataset, val_dataset = data.random_split(
+        dataset, [train_size, val_size], 
+        generator=torch.Generator().manual_seed(SEED)
+    )
+    
+    # Create dataloaders with fixed random seed
     g = torch.Generator()
     g.manual_seed(SEED)
-    dataloader = data.DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                generator=g, worker_init_fn=lambda id: random.seed(SEED + id))
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-
+    train_loader = data.DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        generator=g, 
+        worker_init_fn=lambda id: random.seed(SEED + id)
+    )
+    
+    val_loader = data.DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        generator=g
+    )
+    
+    # Focal loss - this worked well and is worth keeping
+    def focal_bce_loss(pred, target, gamma=2.0, alpha=0.25):
+        bce_loss = nn.functional.binary_cross_entropy(pred, target, reduction='none')
+        
+        # Calculate focal weights - focus on hard examples
+        pt = torch.where(target > 0.5, pred, 1 - pred)
+        focal_weight = (1 - pt) ** gamma
+        
+        # Alpha weighting for positive pixels (text)
+        alpha_weight = torch.where(target > 0.5, alpha, 1 - alpha)
+        
+        # Combine weights and take mean
+        loss = focal_weight * alpha_weight * bce_loss
+        return loss.mean()
+    
+    # AdamW optimizer with moderate weight decay
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    
+    # Simple learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    
+    # Early stopping setup
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
+    
+    # Training loop
     for epoch in range(num_epochs):
-        total_loss = 0
-        for batch_inputs, batch_targets in dataloader:
+        # Training phase
+        model.train()
+        total_train_loss = 0
+        
+        for batch_inputs, batch_targets in train_loader:
             optimizer.zero_grad()
+            
+            # Forward pass
             outputs = model(batch_inputs)
-            # Calculate loss
-            loss = criterion(outputs, batch_targets)
+            
+            # Reshape targets to match model output
+            batch_targets = batch_targets.view(outputs.shape)
+            
+            # Calculate loss with focal weighting
+            loss = focal_bce_loss(outputs, batch_targets)
+            
+            # Backward pass and optimization
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(dataloader)
-        if epoch % 20 == 0:
-            print(f"Epoch {epoch}, Loss: {avg_loss:.6f}")
-        if avg_loss < 1e-4:
-            print(f"Converged at epoch {epoch}, Loss: {avg_loss:.6f}")
+            total_train_loss += loss.item()
+        
+        # Validation phase
+        model.eval()
+        total_val_loss = 0
+        
+        with torch.no_grad():
+            for batch_inputs, batch_targets in val_loader:
+                # Forward pass
+                outputs = model(batch_inputs)
+                
+                # Reshape targets
+                batch_targets = batch_targets.view(outputs.shape)
+                
+                # Calculate validation loss
+                val_loss = focal_bce_loss(outputs, batch_targets)
+                total_val_loss += val_loss.item()
+        
+        # Calculate average losses
+        avg_train_loss = total_train_loss / len(train_loader)
+        avg_val_loss = total_val_loss / len(val_loader)
+        
+        # Update learning rate based on validation performance
+        scheduler.step(avg_val_loss)
+        
+        # Print progress
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+        
+        # Early stopping check
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            best_model_state = model.state_dict().copy()
+            print(f"Epoch {epoch}, New best validation loss: {best_val_loss:.6f}")
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= early_stopping_patience:
+            print(f"Early stopping at epoch {epoch}, Best Val Loss: {best_val_loss:.6f}")
+            # Restore best model
+            model.load_state_dict(best_model_state)
             break
+    
+    # Ensure best model is loaded
+    if best_model_state is not None and patience_counter < early_stopping_patience:
+        model.load_state_dict(best_model_state)
+        print(f"Training completed, Best Val Loss: {best_val_loss:.6f}")
+    
     return model
 
-# Helper function to print a sequence of bitmaps side by side
-def print_string_bitmap(bitmaps, spacing=1):
-    # bitmaps shape: [seq_len, 48]
-    if isinstance(bitmaps, torch.Tensor):
-        bitmaps = bitmaps.detach().cpu().numpy()
-
-    seq_len = len(bitmaps)
-    char_width = 6
-    char_height = 8
-
-    # Print each row
-    for row in range(char_height):
-        line = ""
-        for i in range(seq_len):
-            # Get the corresponding row for the current character
-            char_row = bitmaps[i][row * char_width:(row + 1) * char_width]
-            # Convert to string representation
-            char_line = ''.join(['#' if p >= 0.5 else ' ' for p in char_row])
-            line += char_line + ' ' * spacing
-        print(line)
-
-# Function to save rendered strings as BMP images
-def save_rendered_strings_to_bmp(model, strings):
+# Function to save rendered sheets as BMP images
+def render_strings(model, strings):
+    """Render a list of strings as BMP images"""
     # Fixed parameters
     output_dir = "train_test"
     scale = 4
@@ -205,39 +397,21 @@ def save_rendered_strings_to_bmp(model, strings):
         # Get model prediction
         x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
         with torch.no_grad():
-            pred = model(x).squeeze(0)  # shape [seq_len, 48]
-        pred = pred[:len(string)]  # Only get the actual characters
+            sheet = model(x).squeeze(0)  # shape [sheet_height, sheet_width]
 
         # Convert prediction to numpy array
-        if isinstance(pred, torch.Tensor):
-            pred = pred.detach().cpu().numpy()
-
-        # Determine dimensions of the output image
-        seq_len = len(string)
-        char_width = 6
-        char_height = 8
-        spacing = 1  # Horizontal spacing between characters
+        if isinstance(sheet, torch.Tensor):
+            sheet = sheet.detach().cpu().numpy()
 
         # Create a new image (with white background)
-        img_width = (char_width * seq_len) + (spacing * (seq_len - 1))
-        img_height = char_height
-        img = np.ones((img_height, img_width), dtype=np.uint8) * 255
+        img = np.ones((model.sheet_height, model.sheet_width), dtype=np.uint8) * 255
 
-        # Fill in the image with character bitmaps
-        for char_idx in range(seq_len):
-            # Calculate x-position with spacing
-            x_offset = char_idx * (char_width + spacing)
-
-            # Get the bitmap for this character
-            bitmap = pred[char_idx]
-
-            # Place the bitmap in the image
-            for row in range(char_height):
-                for col in range(char_width):
-                    pixel_value = bitmap[row * char_width + col]
-                    # Set pixel black (0) if the value is >= 0.5; white otherwise
-                    if pixel_value >= 0.5:
-                        img[row, x_offset + col] = 0
+        # Fill in the image with the predicted bitmap
+        for row in range(model.sheet_height):
+            for col in range(model.sheet_width):
+                # Set pixel black (0) if the value is >= 0.5; white otherwise
+                if sheet[row, col] >= 0.5:
+                    img[row, col] = 0
 
         # Scale up the image if needed
         if scale > 1:
@@ -252,46 +426,56 @@ def save_rendered_strings_to_bmp(model, strings):
 
     print(f"Saved {len(strings)} rendered strings to {output_dir}/")
 
-# Render strings to both console and image files
-def render_strings(model, strings):
-    """Render a list of strings to console and BMP files"""
-    # Preview all strings on console
-    for s in strings:
-        # Cap string length to model's max_length
-        if len(s) > model.max_length:
-            s_capped = s[:model.max_length]
-            print(f"\nString: {s} (truncated to: {s_capped})")
-        else:
-            print(f"\nString: {s}")
-            s_capped = s
+# Train the sheet-based renderer
+def train_string_renderer(generate_only=False):
+    print("Creating sheet dataset...")
+    # Create dataset with appropriate parameters for our sheet size
+    sheet_height = 40
+    sheet_width = 120
+    char_height = 8
+    char_width = 6
+    
+    # Calculate how many characters can fit
+    chars_per_row = sheet_width // char_width
+    max_rows = sheet_height // char_height
+    max_chars = chars_per_row * max_rows
+    
+    # Create the dataset and save samples to the train_input folder
+    dataset = create_string_dataset(
+        num_samples=2000,  # Increased to 2000 samples for better learning
+        min_length=10, 
+        max_length=max_chars,
+        sheet_height=sheet_height,
+        sheet_width=sheet_width,
+        char_height=char_height,
+        char_width=char_width,
+        save_samples=True,  # Save sample images
+        samples_dir="train_input",
+        num_samples_to_save=10  # Save 10 samples for reference
+    )
+    
+    # If generate_only flag is set, return without training
+    if generate_only:
+        print("Dataset generation complete. Skipping training.")
+        return None
 
-        # Convert to ASCII codes
-        ascii_codes = [ord(c) for c in s_capped]
-        # Pad if necessary
-        if len(ascii_codes) < model.max_length:
-            ascii_codes = ascii_codes + [0] * (model.max_length - len(ascii_codes))
-
-        # Get prediction
-        x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
-        pred = model(x).squeeze(0)  # shape [seq_len, 48]
-        pred = pred[:len(s_capped)]  # Only get the actual characters
-
-        # Print to console
-        print_string_bitmap(pred)
-
-    # Save to image files
-    save_rendered_strings_to_bmp(model, strings)
-
-# Train the string renderer
-def train_string_renderer():
-    print("Creating string dataset...")
-    # Larger dataset with longer strings for better learning
-    dataset = create_string_dataset(num_samples=2000, min_length=5, max_length=20)
-
-    print("Training attention-based string renderer...")
-    # Use a larger max_length to handle longer strings
-    model = AttentionFontRenderer(max_length=25)
-    model = train_attention_model(model, dataset, num_epochs=800)
+    print("Training attention-based sheet renderer...")
+    # Initialize model with sheet dimensions
+    model = AttentionFontRenderer(
+        max_length=max_chars,
+        sheet_height=sheet_height,
+        sheet_width=sheet_width
+    )
+    
+    # Train with more patience to see validation performance over time
+    model = train_attention_model(
+        model, 
+        dataset, 
+        num_epochs=100,
+        batch_size=32,
+        early_stopping_patience=15,  # More patience to see learning curve
+        validation_split=0.1  # 10% validation data
+    )
 
     return model
 
@@ -302,8 +486,23 @@ def save_model(model, filename="font_renderer.pth"):
 
 def load_model(filename="font_renderer.pth"):
     """Load model weights from a file"""
-    # Use the same max_length as in training
-    model = AttentionFontRenderer(max_length=25)
+    # Use the same dimensions as in training
+    sheet_height = 40
+    sheet_width = 120
+    
+    # Calculate maximum characters
+    char_height = 8
+    char_width = 6
+    chars_per_row = sheet_width // char_width
+    max_rows = sheet_height // char_height
+    max_chars = chars_per_row * max_rows
+    
+    # Initialize model with correct dimensions
+    model = AttentionFontRenderer(
+        max_length=max_chars,
+        sheet_height=sheet_height,
+        sheet_width=sheet_width
+    )
     model.load_state_dict(torch.load(filename))
     model.eval()  # Set to evaluation mode
     print(f"Model loaded from {filename}")
@@ -312,11 +511,30 @@ def load_model(filename="font_renderer.pth"):
 if __name__ == '__main__':
     import sys
 
-    # Check if --train flag is provided
-    if len(sys.argv) > 1 and sys.argv[1] == "--train":
-        # Train mode: train a new model and save it
-        model = train_string_renderer()
-        save_model(model)
+    # Check command-line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--train":
+            # Train mode: train a new model and save it
+            model = train_string_renderer()
+            save_model(model)
+            
+            # Render test strings
+            render_strings(model, [
+                "HELLO WORLD",
+                "THE QUICK BROWN FOX",
+                "ABCDEFGHIJKLMNOPQRST",
+                "CLAUDE CODE",
+                "FONT RENDERER"
+            ])
+        elif sys.argv[1] == "--generate-samples":
+            # Generate samples only without training
+            train_string_renderer(generate_only=True)
+            print("Sample generation complete. Check the train_input/ directory.")
+            sys.exit(0)
+        else:
+            print(f"Unknown option: {sys.argv[1]}")
+            print("Available options: --train, --generate-samples")
+            sys.exit(1)
     else:
         # Render mode: load model if available, otherwise train first
         if os.path.exists("font_renderer.pth"):
@@ -326,11 +544,11 @@ if __name__ == '__main__':
             model = train_string_renderer()
             save_model(model)
 
-    # Render strings - edit this list to change what gets rendered
-    render_strings(model, [
-        "HELLO WORLD",
-        "THE QUICK BROWN FOX",
-        "ABCDEFGHIJKLMNOPQRST",
-        "CLAUDE CODE",
-        "FONT RENDERER"
-    ])
+        # Render strings - edit this list to change what gets rendered
+        render_strings(model, [
+            "HELLO WORLD",
+            "THE QUICK BROWN FOX",
+            "ABCDEFGHIJKLMNOPQRST",
+            "CLAUDE CODE",
+            "FONT RENDERER"
+        ])
