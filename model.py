@@ -14,6 +14,7 @@ Usage:
 
 Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
+  - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets (5000+ samples) produce significantly better quality
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
@@ -26,6 +27,7 @@ Performance optimizations:
   - Larger batch sizes (128) improve training efficiency and output quality
   - Default learning rate (0.001) with batch size 128 provides best speed/quality balance
   - Training time ~4-5 minutes on M2 Pro with these optimizations (vs 26+ minutes without)
+  - Reduced model complexity (removing FC layers) further improves training efficiency
 
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
@@ -77,12 +79,11 @@ class AttentionFontRenderer(nn.Module):
         self.attention = nn.MultiheadAttention(embed_dim=80, num_heads=4, dropout=0.1)
         self.layer_norm = nn.LayerNorm(80)
 
-        # Keep the same processing network
+        # Simplified processing network - removed fc2 layer
         self.fc1 = nn.Linear(80, 160)
         self.dropout1 = nn.Dropout(0.15)
-        self.fc2 = nn.Linear(160, 256)
-        self.dropout2 = nn.Dropout(0.15)
-        self.fc3 = nn.Linear(256 * max_length, self.sheet_size)
+        # fc2 layer removed
+        self.fc3 = nn.Linear(160 * max_length, self.sheet_size)
 
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
@@ -111,18 +112,16 @@ class AttentionFontRenderer(nn.Module):
         # Add residual connection and normalize
         attn_output = self.layer_norm(embedded + attn_output)
 
-        # Process through fully connected layers with dropout (unchanged)
+        # Process through reduced fully connected layers
         x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 160]
         x = self.dropout1(x)
-        x = self.activation(self.fc2(x))  # [batch_size, seq_len, 256]
-        x = self.dropout2(x)
 
         # Reshape to connect all character features
-        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 256]
+        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 160]
 
         # Zero-pad if sequence is shorter than max_length
         if seq_len < self.max_length:
-            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 256,
+            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 160,
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
@@ -369,10 +368,9 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     return model
 
 # Function to save rendered sheets as BMP images
-def render_strings(model, strings):
+def render_strings(model, strings, output_dir="train_test_simplified_fc"):
     """Render a list of strings as BMP images"""
     # Fixed parameters
-    output_dir = "train_test"
     scale = 4
 
     # Ensure the output directory exists
@@ -464,7 +462,9 @@ def train_string_renderer(generate_only=False):
     )
     model = model.to(device)  # Move model to MPS device
 
-    # Train with more patience to see validation performance over time
+    # Train with same settings but using simplified model
+    output_dir = "train_test_simplified_fc"
+    os.makedirs(output_dir, exist_ok=True)
     model = train_attention_model(
         model,
         dataset,
