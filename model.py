@@ -2,7 +2,7 @@
 This file implements an attention-based neural network for rendering ASCII text as bitmap font images.
 
 The model uses self-attention mechanisms that allow characters to influence each other's rendering,
-creating a more coherent font appearance across a string. It includes a complete pipeline for:
+creating a coherent font appearance across a string. It includes a complete pipeline for:
 - Training a neural font renderer on ASCII characters
 - Rendering text strings as bitmap images
 - Saving and loading trained models
@@ -16,11 +16,25 @@ Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets (5000+ samples) produce significantly better quality
+  - PixelShuffle upsampling significantly outperforms U-Net for font rendering, especially with repeating characters
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
   - A balanced model size with moderate embedding dimensions (80) works well
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
+
+Conv2d upsampling architecture experiments:
+  - U-Net with skip connections: (val_loss: 0.011677 @ epoch 90)
+    - Ok for general quality but shows pathological behavior with repeating characters (I's and W's)
+    - Bottleneck layer loses character distinctiveness
+  - 2-steps 4× upsampling: (val_loss: 0.009904 @ epoch 93)
+  - Single-step 4× upsampling: (val_loss: 0.011142 @ epoch 95). Worse than 2-steps upsampling.
+  - PixelShuffle: best results (val_loss: 0.007169 @ epoch 41). Faster training convergence.
+
+Challenging patterns requiring special attention:
+  - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
+  - Alternating character patterns (e.g., "IWIWIWIWIWI")
+  - Groups of similar characters with spaces (e.g., "IIIII IIIII IIIII")
 
 Performance optimizations:
   - Hardware acceleration with MPS (Metal Performance Shaders) gives ~60% speedup on M-series Macs
@@ -32,7 +46,8 @@ Performance optimizations:
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
 
-The model supports sheet-based rendering with a fixed output size (40x120 pixels by default).
+The model supports sheet-based rendering with a fixed output size (40x120 pixels by default),
+with 4x upsampling to produce high-resolution 160x480 output.
 """
 
 import torch
@@ -44,6 +59,20 @@ import os
 import numpy as np
 from PIL import Image
 import chars  # using the custom font from ascii/chars.py
+
+# Global constants for sheet dimensions
+CHAR_HEIGHT = 8
+CHAR_WIDTH = 6
+SHEET_HEIGHT = 40  # 5 rows of characters
+SHEET_WIDTH = 120  # 20 characters per row
+# Calculate how many characters can fit on a sheet
+CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH
+MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
+MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS
+# Default upsampling factor for high-resolution output
+DEFAULT_SCALE_FACTOR = 4
+# Output directory for rendered test strings
+OUTPUT_DIR = "train_test_pixelshuffle_enhanced"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -60,12 +89,18 @@ print(f"Using device: {device}")
 
 # Modified model with single attention layer to test its importance
 class AttentionFontRenderer(nn.Module):
-    def __init__(self, max_length=100, sheet_height=40, sheet_width=120):
+    def __init__(self, max_length=MAX_CHARS_PER_SHEET, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, scale_factor=DEFAULT_SCALE_FACTOR):
         super().__init__()
         self.max_length = max_length
+        # Keep original dimensions for initial output
         self.sheet_height = sheet_height
         self.sheet_width = sheet_width
-        self.sheet_size = sheet_height * sheet_width
+        self.base_sheet_size = sheet_height * sheet_width
+        # Store scale factor for later use
+        self.scale_factor = scale_factor
+        # Final output dimensions after upsampling
+        self.output_height = sheet_height * scale_factor
+        self.output_width = sheet_width * scale_factor
 
         # Keep the same embedding size
         self.embedding = nn.Embedding(128, 80)
@@ -75,15 +110,43 @@ class AttentionFontRenderer(nn.Module):
         self.positional_encoding = nn.Parameter(torch.zeros(max_length, 80))
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
-        # Single attention layer for testing
+        # Single attention layer
         self.attention = nn.MultiheadAttention(embed_dim=80, num_heads=4, dropout=0.1)
         self.layer_norm = nn.LayerNorm(80)
 
-        # Simplified processing network - removed fc2 layer
+        # Processing network (simplified)
         self.fc1 = nn.Linear(80, 160)
         self.dropout1 = nn.Dropout(0.15)
-        # fc2 layer removed
-        self.fc3 = nn.Linear(160 * max_length, self.sheet_size)
+
+        # Generate base resolution bitmap first
+        self.fc_base = nn.Linear(160 * max_length, self.base_sheet_size)
+
+        # PixelShuffle approach for efficient upsampling
+        # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
+        self.upsample = nn.Sequential(
+            # First extract features at base resolution
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+
+            # First pixel shuffle - 2x upscale
+            # Outputs 16 channels but expands to 64 first for the pixel shuffle
+            nn.Conv2d(16, 64, kernel_size=3, padding=1),
+            nn.PixelShuffle(2),  # 64 -> 16 channels, 2x spatial size
+            nn.ReLU(),
+
+            # Second pixel shuffle - another 2x upscale
+            # Outputs 4 channels but expands to 16 first for the pixel shuffle
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Extra processing
+            nn.ReLU(),
+
+            # Final pixelshuffle + refine
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.PixelShuffle(2),  # 16 -> 4 channels, 2x spatial size
+            nn.Conv2d(4, 1, kernel_size=3, padding=1),  # Final output
+            nn.Sigmoid()
+        )
 
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
@@ -125,11 +188,17 @@ class AttentionFontRenderer(nn.Module):
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
-        # Generate the entire sheet bitmap
-        sheet = self.output_activation(self.fc3(x))  # [batch_size, sheet_size]
+        # Generate the base resolution bitmap
+        base_sheet = self.output_activation(self.fc_base(x))  # [batch_size, base_sheet_size]
 
-        # Reshape to proper dimensions
-        sheet = sheet.view(batch_size, self.sheet_height, self.sheet_width)  # [batch_size, 40, 120]
+        # Reshape to proper dimensions for upsampling
+        base_sheet = base_sheet.view(batch_size, 1, self.sheet_height, self.sheet_width)
+
+        # Apply PixelShuffle upsampling layers
+        sheet_with_channel = self.upsample(base_sheet)  # [batch_size, 1, output_height, output_width]
+
+        # Remove the channel dimension for output
+        sheet = sheet_with_channel.squeeze(1)  # [batch_size, output_height, output_width]
 
         return sheet
 
@@ -138,19 +207,56 @@ def generate_random_string(length):
     available_chars = list(chars.chars.keys())
     return ''.join(random.choice(available_chars) for _ in range(length))
 
+# Place string characters as bitmap on a target sheet
+def place_string_on_sheet(string, target_sheet):
+    """
+    Places a string on a target sheet as bitmaps.
+    
+    Args:
+        string (str): The string to render
+        target_sheet (numpy.ndarray): Target array to place characters on
+        
+    Returns:
+        numpy.ndarray: Updated target sheet with rendered string
+    """
+    char_idx = 0
+    for row in range(MAX_ROWS):
+        if char_idx >= len(string):
+            break
+            
+        for col in range(CHARS_PER_ROW):
+            if char_idx >= len(string):
+                break
+                
+            # Get character bitmap
+            if string[char_idx] in chars.chars:
+                char_bitmap = chars.chars[string[char_idx]]
+                
+                # Calculate position in the sheet
+                y_start = row * CHAR_HEIGHT
+                x_start = col * CHAR_WIDTH
+                
+                # Place character bitmap in the sheet
+                for y in range(CHAR_HEIGHT):
+                    for x in range(CHAR_WIDTH):
+                        bitmap_idx = y * CHAR_WIDTH + x
+                        if bitmap_idx < len(char_bitmap):
+                            target_sheet[y_start + y, x_start + x] = char_bitmap[bitmap_idx]
+                            
+            char_idx += 1
+            
+    return target_sheet
+
 # Create a dataset of text sheets and save sample images to a folder
-def create_string_dataset(num_samples=1000, min_length=20, max_length=100,
-                         sheet_height=40, sheet_width=120, char_height=8, char_width=6,
+def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_PER_SHEET,
+                         sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, char_height=CHAR_HEIGHT, char_width=CHAR_WIDTH,
                          save_samples=False, samples_dir="train_input", num_samples_to_save=10):
+    """Create a dataset of text sheets with consistent character grid dimensions."""
     # Reset random seed for reproducible dataset generation
     random.seed(SEED)
 
-    # Calculate how many characters per row and maximum rows
-    chars_per_row = sheet_width // char_width
-    max_rows = sheet_height // char_height
-
-    # Maximum characters per sheet
-    max_chars_per_sheet = chars_per_row * max_rows
+    # Use the global constants
+    max_chars_per_sheet = MAX_CHARS_PER_SHEET
 
     # Pre-allocate arrays for better performance
     all_inputs = []
@@ -172,31 +278,8 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=100,
         ascii_codes = [ord(c) for c in string]
         all_inputs.append(ascii_codes)
 
-        # Position characters in the sheet (monospace layout)
-        char_idx = 0
-        for row in range(max_rows):
-            if char_idx >= len(string):
-                break
-
-            for col in range(chars_per_row):
-                if char_idx >= len(string):
-                    break
-
-                # Get character bitmap
-                char_bitmap = chars.chars[string[char_idx]]
-
-                # Calculate position in the sheet
-                y_start = row * char_height
-                x_start = col * char_width
-
-                # Place character bitmap in the sheet
-                for y in range(char_height):
-                    for x in range(char_width):
-                        bitmap_idx = y * char_width + x
-                        if bitmap_idx < len(char_bitmap):  # Safety check
-                            all_targets[sample_idx, y_start + y, x_start + x] = char_bitmap[bitmap_idx]
-
-                char_idx += 1
+        # Place string on sheet using shared function
+        place_string_on_sheet(string, all_targets[sample_idx])
 
         # Save this sample as an image if requested
         if save_samples and sample_idx < num_samples_to_save:
@@ -207,12 +290,8 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=100,
                     if all_targets[sample_idx, y, x] >= 0.5:
                         img[y, x] = 0
 
-            # Scale up the image for better visibility
-            scale = 4
-            img_scaled = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
-
             # Convert to PIL Image and save
-            pil_img = Image.fromarray(img_scaled)
+            pil_img = Image.fromarray(img)
             filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
             pil_img.save(filename, "BMP")
 
@@ -240,14 +319,62 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=100,
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32,
                          early_stopping_patience=15, validation_split=0.1):
-    # Split dataset into training and validation
-    dataset_size = len(dataset)
-    val_size = int(validation_split * dataset_size)
-    train_size = dataset_size - val_size
-    train_dataset, val_dataset = data.random_split(
+    # Create additional validation samples with specific patterns
+    # These will be added to the validation set to ensure model handles them well
+    additional_val_samples = 20  # Add 20 validation samples with specific patterns
+
+    # Create inputs with repeating patterns
+    pattern_inputs = []
+    pattern_targets = []
+
+    # Generate the patterns
+    patterns = [
+        "IIIIIIIIIIIIIIIIIIII",  # Repeating I's
+        "WWWWWWWWWWWWWWWWWWWW",  # Repeating W's
+        "IIIII IIIII IIIII IIIII",  # Groups of I's with spaces
+        "WWWWW WWWWW WWWWW WWWWW",  # Groups of W's with spaces
+        "IWIWIWIWIWIWIWIWIWIWI",  # Alternating I and W pattern
+        "                     ",
+    ]
+
+    for pattern in patterns:
+        for _ in range(additional_val_samples // len(patterns)):
+            # Convert to ASCII codes
+            ascii_codes = [ord(c) for c in pattern]
+            # Pad to max_length
+            if len(ascii_codes) < MAX_CHARS_PER_SHEET:
+                ascii_codes = ascii_codes + [0] * (MAX_CHARS_PER_SHEET - len(ascii_codes))
+
+            # Create input tensor
+            pattern_input = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
+            pattern_inputs.append(pattern_input)
+
+            # Create target bitmap
+            target = np.zeros((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
+            
+            # Place pattern on sheet using shared function
+            place_string_on_sheet(pattern, target)
+
+            pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
+
+    # Concatenate pattern samples
+    pattern_inputs = torch.cat(pattern_inputs, dim=0)
+    pattern_targets = torch.cat(pattern_targets, dim=0)
+    pattern_dataset = data.TensorDataset(pattern_inputs, pattern_targets)
+
+    # Split the original dataset into training and validation
+    orig_dataset_size = len(dataset)
+    val_size = int(validation_split * orig_dataset_size) - additional_val_samples  # Adjust to account for pattern samples
+    train_size = orig_dataset_size - val_size
+
+    # Split the original dataset
+    train_dataset, val_dataset_orig = data.random_split(
         dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(SEED)
     )
+
+    # Combine the original validation set with our pattern samples
+    val_dataset = data.ConcatDataset([val_dataset_orig, pattern_dataset])
 
     # Create dataloaders with fixed random seed
     g = torch.Generator()
@@ -310,7 +437,24 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             # Forward pass
             outputs = model(batch_inputs)
-            batch_targets = batch_targets.view(outputs.shape)
+
+            # Model is working correctly, no need for debug shapes anymore
+
+            # Since we're training with 4x upsampling, the model outputs will be 4x larger
+            # We need to handle this by upsampling the targets
+            if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
+                # Create a tensor to hold the upsampled targets
+                batch_size = batch_targets.shape[0]
+                upsampled_targets = torch.nn.functional.interpolate(
+                    batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
+                    size=(model.output_height, model.output_width),
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension [B, H, W]
+                batch_targets = upsampled_targets
+            else:
+                # Standard case - just reshape
+                batch_targets = batch_targets.view(outputs.shape)
+
             loss = focal_bce_loss(outputs, batch_targets)
 
             # Backward pass and optimization
@@ -330,7 +474,22 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
                 # Forward pass
                 outputs = model(batch_inputs)
-                batch_targets = batch_targets.view(outputs.shape)
+
+                # Since we're training with 4x upsampling, the model outputs will be 4x larger
+                # We need to handle this by upsampling the targets
+                if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
+                    # Create a tensor to hold the upsampled targets
+                    batch_size = batch_targets.shape[0]
+                    upsampled_targets = torch.nn.functional.interpolate(
+                        batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
+                        size=(model.output_height, model.output_width),
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension [B, H, W]
+                    batch_targets = upsampled_targets
+                else:
+                    # Standard case - just reshape
+                    batch_targets = batch_targets.view(outputs.shape)
+
                 val_loss = focal_bce_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
 
@@ -368,13 +527,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     return model
 
 # Function to save rendered sheets as BMP images
-def render_strings(model, strings, output_dir="train_test_simplified_fc"):
+def render_strings(model, strings, output_dir):
     """Render a list of strings as BMP images"""
-    # Fixed parameters
-    scale = 4
-
-    # Ensure the output directory exists
-    os.makedirs(output_dir, exist_ok=True)
 
     for idx, string in enumerate(strings):
         # Cap string length to model's max_length
@@ -391,30 +545,28 @@ def render_strings(model, strings, output_dir="train_test_simplified_fc"):
         # Get model prediction
         x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0).to(device)
         with torch.no_grad():
-            sheet = model(x).squeeze(0)  # shape [sheet_height, sheet_width]
+            sheet = model(x).squeeze(0)  # shape will be [output_height, output_width]
 
         # Convert prediction to numpy array
         if isinstance(sheet, torch.Tensor):
             sheet = sheet.detach().cpu().numpy()
 
+        # Get dimensions - handle both upsampled and regular outputs
+        sheet_height = sheet.shape[0]
+        sheet_width = sheet.shape[1]
+
         # Create a new image (with white background)
-        img = np.ones((model.sheet_height, model.sheet_width), dtype=np.uint8) * 255
+        img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
 
         # Fill in the image with the predicted bitmap
-        for row in range(model.sheet_height):
-            for col in range(model.sheet_width):
+        for row in range(sheet_height):
+            for col in range(sheet_width):
                 # Set pixel black (0) if the value is >= 0.5; white otherwise
                 if sheet[row, col] >= 0.5:
                     img[row, col] = 0
 
-        # Scale up the image if needed
-        if scale > 1:
-            img_scaled = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
-        else:
-            img_scaled = img
-
         # Convert to PIL Image and save
-        pil_img = Image.fromarray(img_scaled)
+        pil_img = Image.fromarray(img)
         filename = f"{output_dir}/string_{idx}.bmp"
         pil_img.save(filename, "BMP")
 
@@ -423,26 +575,12 @@ def render_strings(model, strings, output_dir="train_test_simplified_fc"):
 # Train the sheet-based renderer
 def train_string_renderer(generate_only=False):
     print("Creating sheet dataset...")
-    # Create dataset with appropriate parameters for our sheet size
-    sheet_height = 40
-    sheet_width = 120
-    char_height = 8
-    char_width = 6
-
-    # Calculate how many characters can fit
-    chars_per_row = sheet_width // char_width
-    max_rows = sheet_height // char_height
-    max_chars = chars_per_row * max_rows
 
     # Create the dataset and save samples to the train_input folder
     dataset = create_string_dataset(
         num_samples=5000,  # Increased to 5000 samples for better learning
         min_length=10,
-        max_length=max_chars,
-        sheet_height=sheet_height,
-        sheet_width=sheet_width,
-        char_height=char_height,
-        char_width=char_width,
+        max_length=MAX_CHARS_PER_SHEET,
         save_samples=True,  # Save sample images
         samples_dir="train_input",
         num_samples_to_save=10  # Save 10 samples for reference
@@ -454,17 +592,14 @@ def train_string_renderer(generate_only=False):
         return None
 
     print("Training attention-based sheet renderer...")
-    # Initialize model with sheet dimensions
+    # Initialize model with sheet dimensions and native upscaling
     model = AttentionFontRenderer(
-        max_length=max_chars,
-        sheet_height=sheet_height,
-        sheet_width=sheet_width
+        max_length=MAX_CHARS_PER_SHEET,
+        sheet_height=SHEET_HEIGHT,
+        sheet_width=SHEET_WIDTH,
+        scale_factor=DEFAULT_SCALE_FACTOR
     )
     model = model.to(device)  # Move model to MPS device
-
-    # Train with same settings but using simplified model
-    output_dir = "train_test_simplified_fc"
-    os.makedirs(output_dir, exist_ok=True)
     model = train_attention_model(
         model,
         dataset,
@@ -483,22 +618,12 @@ def save_model(model, filename="font_renderer.pth"):
 
 def load_model(filename="font_renderer.pth"):
     """Load model weights from a file"""
-    # Use the same dimensions as in training
-    sheet_height = 40
-    sheet_width = 120
-
-    # Calculate maximum characters
-    char_height = 8
-    char_width = 6
-    chars_per_row = sheet_width // char_width
-    max_rows = sheet_height // char_height
-    max_chars = chars_per_row * max_rows
-
-    # Initialize model with correct dimensions
+    # Initialize model with global constants
     model = AttentionFontRenderer(
-        max_length=max_chars,
-        sheet_height=sheet_height,
-        sheet_width=sheet_width
+        max_length=MAX_CHARS_PER_SHEET,
+        sheet_height=SHEET_HEIGHT,
+        sheet_width=SHEET_WIDTH,
+        scale_factor=DEFAULT_SCALE_FACTOR
     )
     model.load_state_dict(torch.load(filename, map_location=device))
     model = model.to(device)
@@ -508,6 +633,9 @@ def load_model(filename="font_renderer.pth"):
 
 if __name__ == '__main__':
     import sys
+
+    # Ensure output directory exists at start
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     test_strings = [
         "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
@@ -519,7 +647,8 @@ if __name__ == '__main__':
         "CLAUDE IS RENDERING FONTS",
         "ZYXWVUTSRQPONMLKJIHGFEDCBA",  # Reverse alphabet
         "AEIOU BCDFGHJKLMNPQRSTVWXYZ",  # Vowels and consonants grouped
-        "EXACTLY TWENTY CHARS"  # Boundary test
+        "EXACTLY TWENTY CHARS",  # Boundary test
+        "                    ",
     ]
     # Check command-line arguments
     if len(sys.argv) > 1:
@@ -529,7 +658,7 @@ if __name__ == '__main__':
             save_model(model)
 
             # Render test strings
-            render_strings(model, test_strings)
+            render_strings(model, test_strings, output_dir=OUTPUT_DIR)
         elif sys.argv[1] == "--generate-samples":
             # Generate samples only without training
             train_string_renderer(generate_only=True)
@@ -549,4 +678,4 @@ if __name__ == '__main__':
             save_model(model)
 
         # Render strings - edit this list to change what gets rendered
-        render_strings(model, test_strings)
+        render_strings(model, test_strings, output_dir=OUTPUT_DIR)
