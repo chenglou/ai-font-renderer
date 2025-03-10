@@ -1,5 +1,5 @@
 """
-This file implements an attention-based neural network for rendering ASCII text as bitmap font images.
+This file implements an attention-based neural network for rendering text as bitmap font images.
 
 The model uses self-attention mechanisms that allow characters to influence each other's rendering,
 creating a coherent font appearance across a string. It includes a complete pipeline for:
@@ -9,7 +9,6 @@ creating a coherent font appearance across a string. It includes a complete pipe
 
 Usage:
   - Run with --train flag to train a new model: python model.py --train
-  - Run with --generate-samples flag to create sample training data: python model.py --generate-samples
   - Run without arguments to load a saved model and render sample strings: python model.py
 
 Architecture learnings:
@@ -48,6 +47,35 @@ Different font styles or character sets might require different approaches.
 
 The model supports sheet-based rendering with a fixed output size (40x120 pixels by default),
 with 4x upsampling to produce high-resolution 160x480 output.
+
+# WIP: High-Resolution Font Rendering Architectural Considerations
+
+We're exploring expanding the model to handle higher-resolution monospace and proportional fonts. 
+The current approach with a large FC layer becomes memory-intensive with high-resolution inputs.
+Two promising alternatives under consideration:
+
+1. Fully Convolutional Approach with Attention:
+   - Replace the large FC layer with convolutional layers
+   - Maintain attention mechanism but operate in 2D space
+   - Memory-efficient for high-resolution inputs
+   - Well-suited for both monospace and proportional fonts
+   - Works well when font rendering requires character-to-character awareness
+   - Less prone to out-of-memory issues on large inputs
+
+2. Vision Transformer (ViT) Inspired Approach:
+   - Split the input image into patches and process with a transformer
+   - Similar to ViT but specialized for font rendering
+   - Maintains character relationships through self-attention
+   - Could better handle spatial relationships in proportional fonts
+   - May require larger datasets to train effectively
+
+The scale_factor parameter remains useful for:
+- Training on lower-resolution and upscaling for specific use cases
+- Managing memory-performance tradeoffs
+- Potential super-resolution applications
+
+Current work focuses on loading pre-generated high-resolution monospace font bitmaps
+from generate_font_bitmap.py as the first step toward these architectural improvements.
 """
 
 import torch
@@ -60,19 +88,31 @@ import numpy as np
 from PIL import Image
 import chars  # using the custom font from ascii/chars.py
 
-# Global constants for sheet dimensions
-CHAR_HEIGHT = 8
-CHAR_WIDTH = 6
-SHEET_HEIGHT = 40  # 5 rows of characters
-SHEET_WIDTH = 120  # 20 characters per row
-# Calculate how many characters can fit on a sheet
-CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH
-MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
-MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS
-# Default upsampling factor for high-resolution output
-DEFAULT_SCALE_FACTOR = 4
+# Import our monospace font dimensions from generate_font_bitmap.py
+import importlib.util
+spec = importlib.util.spec_from_file_location("generate_font_bitmap", "generate_font_bitmap.py")
+font_bitmap_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(font_bitmap_module)
+
+# Use constants from our font bitmap generator
+CHARS_PER_ROW = font_bitmap_module.CHARS_PER_ROW  # 20 chars per row
+MAX_ROWS = font_bitmap_module.NUM_ROWS  # 5 rows
+SHEET_WIDTH = font_bitmap_module.SHEET_WIDTH  # Based on FiraCode measurements
+SHEET_HEIGHT = font_bitmap_module.SHEET_HEIGHT  # Based on FiraCode measurements
+CHAR_WIDTH = SHEET_WIDTH // CHARS_PER_ROW  # Derived from sheet width
+CHAR_HEIGHT = SHEET_HEIGHT // MAX_ROWS  # Derived from sheet height
+MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS  # Total chars per sheet
+
+# No upsampling needed for high-resolution inputs
+DEFAULT_SCALE_FACTOR = 1  # Disable upsampling since input resolution is already good
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_pixelshuffle_enhanced"
+OUTPUT_DIR = "train_test_monospace_font"
+
+print(f"Sheet configuration from generate_font_bitmap.py:")
+print(f"- Character dimensions: {CHAR_WIDTH}x{CHAR_HEIGHT} pixels")
+print(f"- Sheet dimensions: {SHEET_WIDTH}x{SHEET_HEIGHT} pixels")
+print(f"- Characters per sheet: {MAX_CHARS_PER_SHEET}")
+print(f"- Upsampling factor: {DEFAULT_SCALE_FACTOR}x")
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -121,32 +161,52 @@ class AttentionFontRenderer(nn.Module):
         # Generate base resolution bitmap first
         self.fc_base = nn.Linear(160 * max_length, self.base_sheet_size)
 
-        # PixelShuffle approach for efficient upsampling
-        # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
-        self.upsample = nn.Sequential(
-            # First extract features at base resolution
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
+        # For scale_factor=1, we just do some refinement without changing dimensions
+        if self.scale_factor == 1:
+            self.upsample = nn.Sequential(
+                # Extract features at base resolution
+                nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                
+                # Intermediate processing
+                nn.Conv2d(16, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                
+                # Extra detail refinement
+                nn.Conv2d(16, 8, kernel_size=3, padding=1),
+                nn.ReLU(),
+                
+                # Final output layer
+                nn.Conv2d(8, 1, kernel_size=3, padding=1),
+                nn.Sigmoid()
+            )
+        else:
+            # Original PixelShuffle approach for efficient upsampling (if scale_factor > 1)
+            # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
+            self.upsample = nn.Sequential(
+                # First extract features at base resolution
+                nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
 
-            # First pixel shuffle - 2x upscale
-            # Outputs 16 channels but expands to 64 first for the pixel shuffle
-            nn.Conv2d(16, 64, kernel_size=3, padding=1),
-            nn.PixelShuffle(2),  # 64 -> 16 channels, 2x spatial size
-            nn.ReLU(),
+                # First pixel shuffle - 2x upscale
+                # Outputs 16 channels but expands to 64 first for the pixel shuffle
+                nn.Conv2d(16, 64, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),  # 64 -> 16 channels, 2x spatial size
+                nn.ReLU(),
 
-            # Second pixel shuffle - another 2x upscale
-            # Outputs 4 channels but expands to 16 first for the pixel shuffle
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Extra processing
-            nn.ReLU(),
+                # Second pixel shuffle - another 2x upscale
+                # Outputs 4 channels but expands to 16 first for the pixel shuffle
+                nn.Conv2d(16, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Extra processing
+                nn.ReLU(),
 
-            # Final pixelshuffle + refine
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.PixelShuffle(2),  # 16 -> 4 channels, 2x spatial size
-            nn.Conv2d(4, 1, kernel_size=3, padding=1),  # Final output
-            nn.Sigmoid()
-        )
+                # Final pixelshuffle + refine
+                nn.Conv2d(16, 16, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),  # 16 -> 4 channels, 2x spatial size
+                nn.Conv2d(4, 1, kernel_size=3, padding=1),  # Final output
+                nn.Sigmoid()
+            )
 
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
@@ -191,10 +251,10 @@ class AttentionFontRenderer(nn.Module):
         # Generate the base resolution bitmap
         base_sheet = self.output_activation(self.fc_base(x))  # [batch_size, base_sheet_size]
 
-        # Reshape to proper dimensions for upsampling
+        # Reshape to proper dimensions for processing
         base_sheet = base_sheet.view(batch_size, 1, self.sheet_height, self.sheet_width)
-
-        # Apply PixelShuffle upsampling layers
+        
+        # Apply processing layers (with or without upsampling)
         sheet_with_channel = self.upsample(base_sheet)  # [batch_size, 1, output_height, output_width]
 
         # Remove the channel dimension for output
@@ -247,134 +307,104 @@ def place_string_on_sheet(string, target_sheet):
             
     return target_sheet
 
-# Create a dataset of text sheets and save sample images to a folder
-def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_PER_SHEET,
-                         sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, char_height=CHAR_HEIGHT, char_width=CHAR_WIDTH,
-                         save_samples=False, samples_dir="train_input", num_samples_to_save=10):
-    """Create a dataset of text sheets with consistent character grid dimensions."""
+# Create a dataset from pre-generated monospace font bitmap images
+def create_string_dataset(num_samples=5000, samples_dir="train_monospace_input"):
+    """Load pre-generated monospace font images as training data."""
     # Reset random seed for reproducible dataset generation
     random.seed(SEED)
-
-    # Use the global constants
-    max_chars_per_sheet = MAX_CHARS_PER_SHEET
-
-    # Pre-allocate arrays for better performance
+    
+    # Check if the directory exists
+    if not os.path.exists(samples_dir):
+        raise FileNotFoundError(f"Dataset directory '{samples_dir}' not found. Run generate_font_bitmap.py first.")
+    
+    # Get list of all bitmap files in the directory - our naming convention is {idx}_{text}.bmp
+    bitmap_files = [f for f in os.listdir(samples_dir) 
+                   if f.endswith('.bmp') and not f.startswith('special_')]
+    
+    if len(bitmap_files) == 0:
+        raise ValueError(f"No bitmap files found in {samples_dir}. Run generate_font_bitmap.py first.")
+        
+    print(f"Found {len(bitmap_files)} bitmap files in {samples_dir}")
+    
+    # Limit to num_samples if needed
+    if len(bitmap_files) > num_samples:
+        bitmap_files = bitmap_files[:num_samples]
+    
+    # Pre-allocate arrays
     all_inputs = []
-    all_strings = []  # Store generated strings for reference
-    all_targets = np.zeros((num_samples, sheet_height, sheet_width), dtype=np.float32)
-
-    # Create output directory if saving samples
-    if save_samples:
-        os.makedirs(samples_dir, exist_ok=True)
-        print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
-
-    for sample_idx in range(num_samples):
-        # Generate a random string that fits in the sheet
-        length = random.randint(min_length, min(max_length, max_chars_per_sheet))
-        string = generate_random_string(length)
-        all_strings.append(string)
-
-        # Convert to ASCII codes
-        ascii_codes = [ord(c) for c in string]
-        all_inputs.append(ascii_codes)
-
-        # Place string on sheet using shared function
-        place_string_on_sheet(string, all_targets[sample_idx])
-
-        # Save this sample as an image if requested
-        if save_samples and sample_idx < num_samples_to_save:
-            # Convert binary sheet to image
-            img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
-            for y in range(sheet_height):
-                for x in range(sheet_width):
-                    if all_targets[sample_idx, y, x] >= 0.5:
-                        img[y, x] = 0
-
-            # Convert to PIL Image and save
-            pil_img = Image.fromarray(img)
-            filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
-            pil_img.save(filename, "BMP")
-
-            # Also save the input string for reference
-            with open(f"{samples_dir}/input_{sample_idx}_text.txt", "w") as f:
-                f.write(string)
-
+    all_targets = np.zeros((len(bitmap_files), SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
+    
+    for idx, bitmap_file in enumerate(bitmap_files):
+        # Extract the ID and partial string from the filename
+        # Format: X_STRING.bmp (where X is a number)
+        file_parts = bitmap_file.split('_', 1)
+        if len(file_parts) >= 2:
+            # Extract the partial string from the filename
+            partial_string = file_parts[1].replace('.bmp', '')
+            
+            # Convert the partial string back to a full string
+            string = partial_string.replace('_', ' ')
+            string = string[:MAX_CHARS_PER_SHEET]
+            
+            # Convert to ASCII codes
+            ascii_codes = [ord(c) for c in string]
+            all_inputs.append(ascii_codes)
+            
+            # Load the bitmap image
+            bitmap_path = os.path.join(samples_dir, bitmap_file)
+            img = Image.open(bitmap_path).convert('L')  # Convert to grayscale
+            
+            # Convert to numpy array
+            img_array = np.array(img)
+            
+            # Ensure the image dimensions match what we expect
+            if img_array.shape[0] != SHEET_HEIGHT or img_array.shape[1] != SHEET_WIDTH:
+                print(f"Warning: Image file {bitmap_file} has dimensions {img_array.shape}, resizing to {SHEET_HEIGHT}x{SHEET_WIDTH}")
+                # Resize the image to match expected dimensions
+                img_resized = Image.fromarray(img_array).resize((SHEET_WIDTH, SHEET_HEIGHT), Image.LANCZOS)
+                img_array = np.array(img_resized)
+            
+            # Normalize to 0-1 range and invert colors (black text on white background)
+            all_targets[idx] = (255 - img_array) / 255.0
+        
+        # Progress indicator
+        if (idx + 1) % 100 == 0:
+            print(f"Loaded {idx + 1}/{len(bitmap_files)} images")
+    
     # Pad sequences to max_length
-    max_len = max(len(s) for s in all_inputs)
-    padded_inputs = np.zeros((num_samples, max_len), dtype=np.int64)
-
+    max_len = max(len(codes) for codes in all_inputs)
+    padded_inputs = np.zeros((len(bitmap_files), max_len), dtype=np.int64)
+    
     for i, codes in enumerate(all_inputs):
         # Pad inputs with zeros
         padded_inputs[i, :len(codes)] = codes
-
+    
     # Convert to tensors
     inputs_tensor = torch.tensor(padded_inputs, dtype=torch.long)
     targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
-
-    if save_samples:
-        print(f"Dataset creation complete: {num_samples} samples with dimensions {sheet_height}x{sheet_width}")
-
+    
+    print(f"Dataset loading complete: {len(bitmap_files)} samples with dimensions {SHEET_HEIGHT}x{SHEET_WIDTH}")
+    
     return data.TensorDataset(inputs_tensor, targets_tensor)
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32,
                          early_stopping_patience=15, validation_split=0.1):
-    # Create additional validation samples with specific patterns
-    # These will be added to the validation set to ensure model handles them well
-    additional_val_samples = 20  # Add 20 validation samples with specific patterns
-
-    # Create inputs with repeating patterns
-    pattern_inputs = []
-    pattern_targets = []
-
-    # Generate the patterns
-    patterns = [
-        "IIIIIIIIIIIIIIIIIIII",  # Repeating I's
-        "WWWWWWWWWWWWWWWWWWWW",  # Repeating W's
-        "IIIII IIIII IIIII IIIII",  # Groups of I's with spaces
-        "WWWWW WWWWW WWWWW WWWWW",  # Groups of W's with spaces
-        "IWIWIWIWIWIWIWIWIWIWI",  # Alternating I and W pattern
-        "                     ",
-    ]
-
-    for pattern in patterns:
-        for _ in range(additional_val_samples // len(patterns)):
-            # Convert to ASCII codes
-            ascii_codes = [ord(c) for c in pattern]
-            # Pad to max_length
-            if len(ascii_codes) < MAX_CHARS_PER_SHEET:
-                ascii_codes = ascii_codes + [0] * (MAX_CHARS_PER_SHEET - len(ascii_codes))
-
-            # Create input tensor
-            pattern_input = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
-            pattern_inputs.append(pattern_input)
-
-            # Create target bitmap
-            target = np.zeros((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
-            
-            # Place pattern on sheet using shared function
-            place_string_on_sheet(pattern, target)
-
-            pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
-
-    # Concatenate pattern samples
-    pattern_inputs = torch.cat(pattern_inputs, dim=0)
-    pattern_targets = torch.cat(pattern_targets, dim=0)
-    pattern_dataset = data.TensorDataset(pattern_inputs, pattern_targets)
-
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
-    val_size = int(validation_split * orig_dataset_size) - additional_val_samples  # Adjust to account for pattern samples
+    
+    # Calculate validation size, ensuring it's at least 1% of the dataset
+    val_size = max(int(validation_split * orig_dataset_size), int(0.01 * orig_dataset_size))
+    # Ensure we have enough training samples
     train_size = orig_dataset_size - val_size
+    
+    print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
 
     # Split the original dataset
-    train_dataset, val_dataset_orig = data.random_split(
+    train_dataset, val_dataset = data.random_split(
         dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(SEED)
     )
-
-    # Combine the original validation set with our pattern samples
-    val_dataset = data.ConcatDataset([val_dataset_orig, pattern_dataset])
 
     # Create dataloaders with fixed random seed
     g = torch.Generator()
@@ -438,22 +468,15 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
             # Forward pass
             outputs = model(batch_inputs)
 
-            # Model is working correctly, no need for debug shapes anymore
-
-            # Since we're training with 4x upsampling, the model outputs will be 4x larger
-            # We need to handle this by upsampling the targets
-            if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
-                # Create a tensor to hold the upsampled targets
-                batch_size = batch_targets.shape[0]
+            # Ensure targets match the model output dimensions
+            if outputs.shape != batch_targets.shape:
+                # Use the output shape to determine how to resize targets
                 upsampled_targets = torch.nn.functional.interpolate(
                     batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                    size=(model.output_height, model.output_width),
+                    size=(outputs.shape[1], outputs.shape[2]),  # Use exact output dimensions
                     mode='nearest'
                 ).squeeze(1)  # Remove channel dimension [B, H, W]
                 batch_targets = upsampled_targets
-            else:
-                # Standard case - just reshape
-                batch_targets = batch_targets.view(outputs.shape)
 
             loss = focal_bce_loss(outputs, batch_targets)
 
@@ -475,20 +498,15 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
                 # Forward pass
                 outputs = model(batch_inputs)
 
-                # Since we're training with 4x upsampling, the model outputs will be 4x larger
-                # We need to handle this by upsampling the targets
-                if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
-                    # Create a tensor to hold the upsampled targets
-                    batch_size = batch_targets.shape[0]
+                # Ensure targets match the model output dimensions
+                if outputs.shape != batch_targets.shape:
+                    # Use the output shape to determine how to resize targets
                     upsampled_targets = torch.nn.functional.interpolate(
                         batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                        size=(model.output_height, model.output_width),
+                        size=(outputs.shape[1], outputs.shape[2]),  # Use exact output dimensions
                         mode='nearest'
                     ).squeeze(1)  # Remove channel dimension [B, H, W]
                     batch_targets = upsampled_targets
-                else:
-                    # Standard case - just reshape
-                    batch_targets = batch_targets.view(outputs.shape)
 
                 val_loss = focal_bce_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
@@ -572,27 +590,18 @@ def render_strings(model, strings, output_dir):
 
     print(f"Saved {len(strings)} rendered strings to {output_dir}/")
 
-# Train the sheet-based renderer
-def train_string_renderer(generate_only=False):
-    print("Creating sheet dataset...")
+# Train the monospace font renderer
+def train_string_renderer():
+    print("Loading monospace font dataset...")
 
-    # Create the dataset and save samples to the train_input folder
+    # Load the pre-generated monospace font dataset
     dataset = create_string_dataset(
-        num_samples=5000,  # Increased to 5000 samples for better learning
-        min_length=10,
-        max_length=MAX_CHARS_PER_SHEET,
-        save_samples=True,  # Save sample images
-        samples_dir="train_input",
-        num_samples_to_save=10  # Save 10 samples for reference
+        num_samples=5000,  # Use up to 5000 samples for training
+        samples_dir="train_monospace_input"
     )
 
-    # If generate_only flag is set, return without training
-    if generate_only:
-        print("Dataset generation complete. Skipping training.")
-        return None
-
-    print("Training attention-based sheet renderer...")
-    # Initialize model with sheet dimensions and native upscaling
+    print("Training attention-based monospace font renderer...")
+    # Initialize model with sheet dimensions and appropriate upscaling
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
         sheet_height=SHEET_HEIGHT,
@@ -600,12 +609,18 @@ def train_string_renderer(generate_only=False):
         scale_factor=DEFAULT_SCALE_FACTOR
     )
     model = model.to(device)  # Move model to MPS device
+    
+    # Use a moderate batch size
+    batch_size = 32
+    
+    print(f"Using batch size {batch_size} for sheet dimensions {SHEET_WIDTH}x{SHEET_HEIGHT}")
+    
     model = train_attention_model(
         model,
         dataset,
         num_epochs=100,
-        batch_size=128,  # Larger batch size for better speed/quality balance
-        early_stopping_patience=15,  # More patience to see learning curve
+        batch_size=batch_size,
+        early_stopping_patience=15,  # Patience to see learning curve
         validation_split=0.1  # 10% validation data
     )
 
@@ -616,19 +631,27 @@ def save_model(model, filename="font_renderer.pth"):
     torch.save(model.state_dict(), filename)
     print(f"Model saved to {filename}")
 
-def load_model(filename="font_renderer.pth"):
+def load_model(filename="monospace_renderer.pth"):
     """Load model weights from a file"""
-    # Initialize model with global constants
+    # Initialize model with global constants from our monospace font setup
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
         sheet_height=SHEET_HEIGHT,
         sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
-    model.load_state_dict(torch.load(filename, map_location=device))
-    model = model.to(device)
-    model.eval()  # Set to evaluation mode
-    print(f"Model loaded from {filename}")
+    
+    # Load model weights
+    try:
+        model.load_state_dict(torch.load(filename, map_location=device))
+        model = model.to(device)
+        model.eval()  # Set to evaluation mode
+        print(f"Model loaded from {filename}")
+    except Exception as e:
+        print(f"Error loading model from {filename}: {e}")
+        print("This could be due to changes in model architecture or sheet dimensions.")
+        raise
+        
     return model
 
 if __name__ == '__main__':
@@ -637,45 +660,55 @@ if __name__ == '__main__':
     # Ensure output directory exists at start
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # Test strings for the monospace font model (higher resolution allows more characters per line)
     test_strings = [
         "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
         "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "WWWWWWWWWWWWWWWWWWWW",  # Width test (repeating wide character)
         "IIIIIIIIIIIIIIIIIIII",  # Width test (repeating narrow character)
-        "ALTERNATING CASE TEST   SPACES",  # Spacing test
-        "CLAUDE IS RENDERING FONTS",
+        "ALTERNATING CASE TEST   SPACES",  # Spacing test 
+        "CLAUDE IS RENDERING MONOSPACE FONTS",
         "ZYXWVUTSRQPONMLKJIHGFEDCBA",  # Reverse alphabet
         "AEIOU BCDFGHJKLMNPQRSTVWXYZ",  # Vowels and consonants grouped
         "EXACTLY TWENTY CHARS",  # Boundary test
         "                    ",
     ]
+    
     # Check command-line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "--train":
+            # First check if the monospace dataset exists
+            if not os.path.exists("train_monospace_input"):
+                print("Error: Monospace font dataset not found.")
+                print("Please run generate_font_bitmap.py first to create the dataset.")
+                sys.exit(1)
+                
             # Train mode: train a new model and save it
             model = train_string_renderer()
-            save_model(model)
+            save_model(model, filename="monospace_renderer.pth")
 
             # Render test strings
             render_strings(model, test_strings, output_dir=OUTPUT_DIR)
-        elif sys.argv[1] == "--generate-samples":
-            # Generate samples only without training
-            train_string_renderer(generate_only=True)
-            print("Sample generation complete. Check the train_input/ directory.")
-            sys.exit(0)
         else:
             print(f"Unknown option: {sys.argv[1]}")
-            print("Available options: --train, --generate-samples")
+            print("Available options: --train")
             sys.exit(1)
     else:
         # Render mode: load model if available, otherwise train first
-        if os.path.exists("font_renderer.pth"):
-            model = load_model()
+        model_filename = "monospace_renderer.pth"
+        if os.path.exists(model_filename):
+            model = load_model(filename=model_filename)
         else:
+            # Check if the dataset exists
+            if not os.path.exists("train_monospace_input"):
+                print("Error: Monospace font dataset not found.")
+                print("Please run generate_font_bitmap.py first to create the dataset.")
+                sys.exit(1)
+                
             print("No saved model found. Training a new model...")
             model = train_string_renderer()
-            save_model(model)
+            save_model(model, filename=model_filename)
 
         # Render strings - edit this list to change what gets rendered
         render_strings(model, test_strings, output_dir=OUTPUT_DIR)
