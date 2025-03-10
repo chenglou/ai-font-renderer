@@ -59,6 +59,7 @@ import os
 import numpy as np
 from PIL import Image
 import chars  # using the custom font from ascii/chars.py
+# No mixed precision imports needed
 
 # Global constants for sheet dimensions
 CHAR_HEIGHT = 8
@@ -83,8 +84,24 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Use MPS (Metal Performance Shaders) for M-series Mac if available
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+# Device selection based on available hardware
+# First try CUDA with specific GPUs (3, 4, 5 as requested)
+if torch.cuda.is_available():
+    # Set visible devices to only GPUs 3, 4, 5
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3,4,5"
+    device = torch.device('cuda')
+    # Print GPU info
+    print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
+# Fallback to MPS for M-series Mac
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+    print("Using MPS device for Apple Silicon")
+# Final fallback to CPU
+else:
+    device = torch.device('cpu')
+    print("GPU not available, using CPU")
+
 print(f"Using device: {device}")
 
 # Modified model with single attention layer to test its importance
@@ -396,6 +413,20 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
     # Focal loss - known to work well for this task
     def focal_bce_loss(pred, target, gamma=2.0, alpha=0.25):
+        # Make sure target and pred have the same shape
+        if pred.shape != target.shape:
+            # If they don't match, we need to resize target to match pred
+            # This is expected behavior due to the 4x upsampling in the model
+            # Resize target to match pred's shape using interpolation
+            target = torch.nn.functional.interpolate(
+                target.unsqueeze(1) if target.dim() == 3 else target,
+                size=pred.shape[1:] if pred.dim() > 2 else pred.shape,
+                mode='nearest'
+            )
+            if target.dim() > pred.dim():
+                target = target.squeeze(1)
+            
+        # Now the shapes should match, proceed with focal loss calculation
         bce_loss = nn.functional.binary_cross_entropy(pred, target, reduction='none')
 
         # Calculate focal weights - focus on hard examples
@@ -407,6 +438,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
         # Combine weights and take mean
         loss = focal_weight * alpha_weight * bce_loss
+            
         return loss.mean()
 
     # AdamW optimizer with moderate weight decay
@@ -421,6 +453,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     best_val_loss = float('inf')
     patience_counter = 0
     best_model_state = None
+    
+    # No mixed precision setup needed
 
     # Training loop
     for epoch in range(num_epochs):
@@ -437,29 +471,15 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             # Forward pass
             outputs = model(batch_inputs)
-
-            # Model is working correctly, no need for debug shapes anymore
-
-            # Since we're training with 4x upsampling, the model outputs will be 4x larger
-            # We need to handle this by upsampling the targets
-            if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
-                # Create a tensor to hold the upsampled targets
-                batch_size = batch_targets.shape[0]
-                upsampled_targets = torch.nn.functional.interpolate(
-                    batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                    size=(model.output_height, model.output_width),
-                    mode='nearest'
-                ).squeeze(1)  # Remove channel dimension [B, H, W]
-                batch_targets = upsampled_targets
-            else:
-                # Standard case - just reshape
-                batch_targets = batch_targets.view(outputs.shape)
-
+            
+            # Let the focal_bce_loss function handle the resizing of targets
+            
             loss = focal_bce_loss(outputs, batch_targets)
-
-            # Backward pass and optimization
+            
+            # Standard backward pass and optimization
             loss.backward()
             optimizer.step()
+                
             total_train_loss += loss.item()
 
         # Validation phase
@@ -476,19 +496,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
                 outputs = model(batch_inputs)
 
                 # Since we're training with 4x upsampling, the model outputs will be 4x larger
-                # We need to handle this by upsampling the targets
-                if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
-                    # Create a tensor to hold the upsampled targets
-                    batch_size = batch_targets.shape[0]
-                    upsampled_targets = torch.nn.functional.interpolate(
-                        batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                        size=(model.output_height, model.output_width),
-                        mode='nearest'
-                    ).squeeze(1)  # Remove channel dimension [B, H, W]
-                    batch_targets = upsampled_targets
-                else:
-                    # Standard case - just reshape
-                    batch_targets = batch_targets.view(outputs.shape)
+                # Let the focal_bce_loss function handle the resizing of targets
 
                 val_loss = focal_bce_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
@@ -529,18 +537,21 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 # Function to save rendered sheets as BMP images
 def render_strings(model, strings, output_dir):
     """Render a list of strings as BMP images"""
-
+    
+    # Handle model that's wrapped in DataParallel
+    module = model.module if hasattr(model, 'module') else model
+    
     for idx, string in enumerate(strings):
         # Cap string length to model's max_length
-        if len(string) > model.max_length:
-            string = string[:model.max_length]
-            print(f"Warning: String truncated to {model.max_length} characters: {string}")
+        if len(string) > module.max_length:
+            string = string[:module.max_length]
+            print(f"Warning: String truncated to {module.max_length} characters: {string}")
 
         # Convert to ASCII codes
         ascii_codes = [ord(c) for c in string]
         # Pad if necessary
-        if len(ascii_codes) < model.max_length:
-            ascii_codes = ascii_codes + [0] * (model.max_length - len(ascii_codes))
+        if len(ascii_codes) < module.max_length:
+            ascii_codes = ascii_codes + [0] * (module.max_length - len(ascii_codes))
 
         # Get model prediction
         x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0).to(device)
@@ -599,12 +610,21 @@ def train_string_renderer(generate_only=False):
         sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
-    model = model.to(device)  # Move model to MPS device
+    model = model.to(device)  # Move model to selected device
+    
+    # Use DataParallel if multiple CUDA devices are available
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for data parallel training")
+        model = nn.DataParallel(model)
+    
+    # Use consistent batch size to simplify
+    batch_size = 128
+    
     model = train_attention_model(
         model,
         dataset,
         num_epochs=100,
-        batch_size=128,  # Larger batch size for better speed/quality balance
+        batch_size=batch_size,  # Fixed batch size for simplicity
         early_stopping_patience=15,  # More patience to see learning curve
         validation_split=0.1  # 10% validation data
     )
@@ -613,7 +633,9 @@ def train_string_renderer(generate_only=False):
 
 def save_model(model, filename="font_renderer.pth"):
     """Save model weights to a file"""
-    torch.save(model.state_dict(), filename)
+    # Handle DataParallel wrapped model
+    model_to_save = model.module if hasattr(model, 'module') else model
+    torch.save(model_to_save.state_dict(), filename)
     print(f"Model saved to {filename}")
 
 def load_model(filename="font_renderer.pth"):
@@ -627,6 +649,12 @@ def load_model(filename="font_renderer.pth"):
     )
     model.load_state_dict(torch.load(filename, map_location=device))
     model = model.to(device)
+    
+    # Use DataParallel if multiple CUDA devices are available for inference
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for data parallel inference")
+        model = nn.DataParallel(model)
+        
     model.eval()  # Set to evaluation mode
     print(f"Model loaded from {filename}")
     return model
