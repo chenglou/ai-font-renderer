@@ -123,9 +123,20 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Use MPS (Metal Performance Shaders) for M-series Mac if available
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
-print(f"Using device: {device}")
+# Configure CUDA devices - restrict to GPUs 3, 4, 5 as requested
+os.environ["CUDA_VISIBLE_DEVICES"] = "3,4,5"
+
+# Device selection logic
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+    print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+    print("Using MPS (Metal Performance Shaders) device")
+else:
+    device = torch.device('cpu')
+    print("Using CPU device")
 
 # Modified model with single attention layer to test its importance
 class AttentionFontRenderer(nn.Module):
@@ -409,11 +420,14 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     # Create dataloaders with fixed random seed
     g = torch.Generator()
     g.manual_seed(SEED)
+    
     train_loader = data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         generator=g,
+        num_workers=4,
+        pin_memory=True,
         worker_init_fn=lambda id: random.seed(SEED + id)
     )
 
@@ -421,7 +435,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        generator=g
+        num_workers=2,
+        pin_memory=True
     )
 
     # Focal loss - known to work well for this task
@@ -457,13 +472,14 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         # Training phase
         model.train()
         total_train_loss = 0
+        train_steps = 0
 
         for batch_inputs, batch_targets in train_loader:
             optimizer.zero_grad()
 
             # Move inputs and targets to device
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
+            batch_inputs = batch_inputs.to(device, non_blocking=True)
+            batch_targets = batch_targets.to(device, non_blocking=True)
 
             # Forward pass
             outputs = model(batch_inputs)
@@ -480,20 +496,23 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             loss = focal_bce_loss(outputs, batch_targets)
 
-            # Backward pass and optimization
+            # Standard backward pass
             loss.backward()
             optimizer.step()
+                
             total_train_loss += loss.item()
+            train_steps += 1
 
         # Validation phase
         model.eval()
         total_val_loss = 0
+        val_steps = 0
 
         with torch.no_grad():
             for batch_inputs, batch_targets in val_loader:
                 # Move inputs and targets to device
-                batch_inputs = batch_inputs.to(device)
-                batch_targets = batch_targets.to(device)
+                batch_inputs = batch_inputs.to(device, non_blocking=True)
+                batch_targets = batch_targets.to(device, non_blocking=True)
 
                 # Forward pass
                 outputs = model(batch_inputs)
@@ -510,16 +529,17 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
                 val_loss = focal_bce_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
+                val_steps += 1
 
         # Calculate average losses
-        avg_train_loss = total_train_loss / len(train_loader)
-        avg_val_loss = total_val_loss / len(val_loader)
+        avg_train_loss = total_train_loss / train_steps
+        avg_val_loss = total_val_loss / val_steps
 
         # Update learning rate based on validation performance
         scheduler.step(avg_val_loss)
 
         # Print progress
-        if epoch % 10 == 0:
+        if epoch % 10 == 0 or epoch == 0:
             print(f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
 
         # Early stopping check
@@ -533,15 +553,13 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
         if patience_counter >= early_stopping_patience:
             print(f"Early stopping at epoch {epoch}, Best Val Loss: {best_val_loss:.6f}")
-            # Restore best model
-            model.load_state_dict(best_model_state)
             break
 
     # Ensure best model is loaded
     if best_model_state is not None and patience_counter < early_stopping_patience:
         model.load_state_dict(best_model_state)
         print(f"Training completed, Best Val Loss: {best_val_loss:.6f}")
-
+    
     return model
 
 # Function to save rendered sheets as BMP images
@@ -608,13 +626,24 @@ def train_string_renderer():
         sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
-    model = model.to(device)  # Move model to MPS device
     
-    # Use a moderate batch size
-    batch_size = 32
+    # Move model to device
+    model = model.to(device)
+    
+    # Adjust batch size based on hardware
+    if torch.cuda.is_available():
+        # Larger batch size for GPU training
+        batch_size = 64
+    elif torch.backends.mps.is_available():
+        # Moderate batch size for MPS
+        batch_size = 32
+    else:
+        # Smaller batch size for CPU
+        batch_size = 16
     
     print(f"Using batch size {batch_size} for sheet dimensions {SHEET_WIDTH}x{SHEET_HEIGHT}")
     
+    # Train the model
     model = train_attention_model(
         model,
         dataset,

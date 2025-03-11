@@ -4,6 +4,7 @@ import math
 import time
 from PIL import Image, ImageDraw, ImageFont
 import multiprocessing as mp
+import sys
 
 # Configuration
 SEED = 42
@@ -91,8 +92,16 @@ def create_dataset_parallel(num_samples=100, min_length=10, num_processes=None):
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Determine processing configuration
-    num_processes = mp.cpu_count() if num_processes is None else num_processes
+    # Determine optimal number of processes
+    if num_processes is None:
+        # Get the number of available CPUs
+        available_cpus = mp.cpu_count()
+        
+        # Use a maximum of 75% of available CPUs to avoid overwhelming the system
+        num_processes = max(1, int(available_cpus * 0.75))
+        
+        print(f"Auto-detected {available_cpus} CPUs, using {num_processes} parallel processes")
+    
     batch_size = max(10, math.ceil(num_samples / num_processes))
     num_batches = math.ceil(num_samples / batch_size)
     
@@ -106,11 +115,22 @@ def create_dataset_parallel(num_samples=100, min_length=10, num_processes=None):
         size = min(batch_size, num_samples - start_idx)
         batches.append((start_idx, size, min_length, b))
     
-    # Process in parallel
+    # Process in parallel with progress tracking
     with mp.Pool(processes=num_processes) as pool:
         # Handle random samples
         print("Generating random samples...")
-        results = pool.map(process_batch, batches)
+        
+        # Use imap to get results as they complete for progress tracking
+        completed = 0
+        total_samples = num_samples
+        
+        for result in pool.imap_unordered(process_batch, batches):
+            completed += result
+            progress = (completed / total_samples) * 100
+            print(f"\rProgress: {progress:.1f}% ({completed}/{total_samples} samples)", end="")
+            sys.stdout.flush()
+        
+        print("\nAll random samples generated.")
         
         # Handle special patterns
         print("Generating special test patterns...")
@@ -133,5 +153,15 @@ if __name__ == "__main__":
     print(f"- Sheet dimensions: {SHEET_WIDTH}x{SHEET_HEIGHT} pixels")
     print(f"- Characters per sheet: {MAX_CHARS_PER_SHEET}")
     
-    # Create dataset with 5000 samples
-    create_dataset_parallel(num_samples=5000)
+    # Get number of samples from command line if provided
+    num_samples = 5000
+    if len(sys.argv) > 1:
+        try:
+            num_samples = int(sys.argv[1])
+            print(f"Creating dataset with {num_samples} samples")
+        except ValueError:
+            print(f"Invalid number of samples: {sys.argv[1]}")
+            print(f"Using default: {num_samples}")
+    
+    # Create dataset with specified number of samples
+    create_dataset_parallel(num_samples=num_samples)
