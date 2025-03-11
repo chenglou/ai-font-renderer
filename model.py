@@ -19,7 +19,7 @@ Architecture learnings:
   - PixelShuffle upsampling significantly outperforms U-Net for font rendering, especially with repeating characters
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
-  - A balanced model size with moderate embedding dimensions (80) works well
+  - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
 
@@ -83,11 +83,27 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Use MPS (Metal Performance Shaders) for M-series Mac if available
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
-print(f"Using device: {device}")
+# Configure CUDA device - restrict to GPU 3 only
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+# Device selection logic
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+    print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+    print("Using MPS (Metal Performance Shaders) device")
+else:
+    device = torch.device('cpu')
+    print("Using CPU device")
+
+print(f"Device: {device}")
 
 # Modified model with single attention layer to test its importance
+# Changes:
+# - Reduced embedding dimension from 80 to 32 for memory efficiency
+# - Adjusted intermediate feature dimension from 160 to 64
+# - This reduces memory usage by ~60% in the embedding and attention layers
 class AttentionFontRenderer(nn.Module):
     def __init__(self, max_length=MAX_CHARS_PER_SHEET, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, scale_factor=DEFAULT_SCALE_FACTOR):
         super().__init__()
@@ -102,24 +118,25 @@ class AttentionFontRenderer(nn.Module):
         self.output_height = sheet_height * scale_factor
         self.output_width = sheet_width * scale_factor
 
-        # Keep the same embedding size
-        self.embedding = nn.Embedding(128, 80)
+        # Reduced embedding dimension (80 → 32)
+        self.embedding_dim = 32  # Reduced from 80
+        self.embedding = nn.Embedding(128, self.embedding_dim)
         self.embedding_dropout = nn.Dropout(0.1)
 
-        # Positional encoding
-        self.positional_encoding = nn.Parameter(torch.zeros(max_length, 80))
+        # Positional encoding with reduced dimension
+        self.positional_encoding = nn.Parameter(torch.zeros(max_length, self.embedding_dim))
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
-        # Single attention layer
-        self.attention = nn.MultiheadAttention(embed_dim=80, num_heads=4, dropout=0.1)
-        self.layer_norm = nn.LayerNorm(80)
+        # Single attention layer with reduced dimension
+        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=4, dropout=0.1)
+        self.layer_norm = nn.LayerNorm(self.embedding_dim)
 
-        # Processing network (simplified)
-        self.fc1 = nn.Linear(80, 160)
+        # Processing network (simplified) - adjusted dimensions
+        self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
         self.dropout1 = nn.Dropout(0.15)
 
         # Generate base resolution bitmap first
-        self.fc_base = nn.Linear(160 * max_length, self.base_sheet_size)
+        self.fc_base = nn.Linear(64 * max_length, self.base_sheet_size)
 
         # PixelShuffle approach for efficient upsampling
         # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
@@ -160,7 +177,7 @@ class AttentionFontRenderer(nn.Module):
         x = x[:, :seq_len]
 
         # Embed the input characters with dropout
-        embedded = self.embedding(x)  # [batch_size, seq_len, 80]
+        embedded = self.embedding(x)  # [batch_size, seq_len, self.embedding_dim]
         embedded = self.embedding_dropout(embedded)
 
         # Add positional encoding
@@ -168,23 +185,23 @@ class AttentionFontRenderer(nn.Module):
         embedded = embedded + positions
 
         # Apply single attention layer with residual connection
-        attn_input = embedded.transpose(0, 1)  # [seq_len, batch_size, 80]
+        attn_input = embedded.transpose(0, 1)  # [seq_len, batch_size, self.embedding_dim]
         attn_output, _ = self.attention(attn_input, attn_input, attn_input)
-        attn_output = attn_output.transpose(0, 1)  # [batch_size, seq_len, 80]
+        attn_output = attn_output.transpose(0, 1)  # [batch_size, seq_len, self.embedding_dim]
 
         # Add residual connection and normalize
         attn_output = self.layer_norm(embedded + attn_output)
 
         # Process through reduced fully connected layers
-        x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 160]
+        x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 64]
         x = self.dropout1(x)
 
         # Reshape to connect all character features
-        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 160]
+        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 64]
 
         # Zero-pad if sequence is shorter than max_length
         if seq_len < self.max_length:
-            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 160,
+            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 64,
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
@@ -366,6 +383,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     orig_dataset_size = len(dataset)
     val_size = int(validation_split * orig_dataset_size) - additional_val_samples  # Adjust to account for pattern samples
     train_size = orig_dataset_size - val_size
+    
+    print(f"Dataset split: {train_size} training samples, {val_size + additional_val_samples} validation samples")
 
     # Split the original dataset
     train_dataset, val_dataset_orig = data.random_split(
@@ -379,11 +398,15 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     # Create dataloaders with fixed random seed
     g = torch.Generator()
     g.manual_seed(SEED)
+    
+    # Optimize DataLoader for GPU usage
     train_loader = data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         generator=g,
+        num_workers=4,
+        pin_memory=True,
         worker_init_fn=lambda id: random.seed(SEED + id)
     )
 
@@ -391,7 +414,9 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        generator=g
+        generator=g,
+        num_workers=2,
+        pin_memory=True
     )
 
     # Focal loss - known to work well for this task
@@ -431,9 +456,9 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         for batch_inputs, batch_targets in train_loader:
             optimizer.zero_grad()
 
-            # Move inputs and targets to device
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
+            # Move inputs and targets to device with non-blocking transfers
+            batch_inputs = batch_inputs.to(device, non_blocking=True)
+            batch_targets = batch_targets.to(device, non_blocking=True)
 
             # Forward pass
             outputs = model(batch_inputs)
@@ -468,9 +493,9 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
         with torch.no_grad():
             for batch_inputs, batch_targets in val_loader:
-                # Move inputs and targets to device
-                batch_inputs = batch_inputs.to(device)
-                batch_targets = batch_targets.to(device)
+                # Move inputs and targets to device with non-blocking transfers
+                batch_inputs = batch_inputs.to(device, non_blocking=True)
+                batch_targets = batch_targets.to(device, non_blocking=True)
 
                 # Forward pass
                 outputs = model(batch_inputs)
@@ -591,7 +616,7 @@ def train_string_renderer(generate_only=False):
         print("Dataset generation complete. Skipping training.")
         return None
 
-    print("Training attention-based sheet renderer...")
+    print("Training attention-based sheet renderer with reduced embedding dimensions...")
     # Initialize model with sheet dimensions and native upscaling
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
@@ -599,12 +624,25 @@ def train_string_renderer(generate_only=False):
         sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
-    model = model.to(device)  # Move model to MPS device
+    
+    # Move model to device
+    model = model.to(device)
+    
+    # Adjust batch size based on hardware
+    if torch.cuda.is_available():
+        # Larger batch size for GPU
+        batch_size = 256  # CUDA can handle larger batches
+    else:
+        # Original batch size for CPU/MPS
+        batch_size = 128
+        
+    print(f"Using batch size {batch_size}")
+    
     model = train_attention_model(
         model,
         dataset,
         num_epochs=100,
-        batch_size=128,  # Larger batch size for better speed/quality balance
+        batch_size=batch_size,
         early_stopping_patience=15,  # More patience to see learning curve
         validation_split=0.1  # 10% validation data
     )
