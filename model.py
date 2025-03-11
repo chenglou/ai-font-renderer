@@ -19,7 +19,8 @@ Architecture learnings:
   - PixelShuffle upsampling significantly outperforms U-Net for font rendering, especially with repeating characters
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
-  - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage
+  - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage (~60% reduction)
+  - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output), disregarding embedding dimensions (32 or 80). Maybe learned pos captures specific spatial relationships?
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
 
@@ -57,6 +58,7 @@ import torch.utils.data as data
 import random
 import os
 import numpy as np
+import math
 from PIL import Image
 import chars  # using the custom font from ascii/chars.py
 
@@ -99,11 +101,6 @@ else:
 
 print(f"Device: {device}")
 
-# Modified model with single attention layer to test its importance
-# Changes:
-# - Reduced embedding dimension from 80 to 32 for memory efficiency
-# - Adjusted intermediate feature dimension from 160 to 64
-# - This reduces memory usage by ~60% in the embedding and attention layers
 class AttentionFontRenderer(nn.Module):
     def __init__(self, max_length=MAX_CHARS_PER_SHEET, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, scale_factor=DEFAULT_SCALE_FACTOR):
         super().__init__()
@@ -123,7 +120,7 @@ class AttentionFontRenderer(nn.Module):
         self.embedding = nn.Embedding(128, self.embedding_dim)
         self.embedding_dropout = nn.Dropout(0.1)
 
-        # Positional encoding with reduced dimension
+        # Learned positional encoding with reduced dimension
         self.positional_encoding = nn.Parameter(torch.zeros(max_length, self.embedding_dim))
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
@@ -228,11 +225,11 @@ def generate_random_string(length):
 def place_string_on_sheet(string, target_sheet):
     """
     Places a string on a target sheet as bitmaps.
-    
+
     Args:
         string (str): The string to render
         target_sheet (numpy.ndarray): Target array to place characters on
-        
+
     Returns:
         numpy.ndarray: Updated target sheet with rendered string
     """
@@ -240,28 +237,28 @@ def place_string_on_sheet(string, target_sheet):
     for row in range(MAX_ROWS):
         if char_idx >= len(string):
             break
-            
+
         for col in range(CHARS_PER_ROW):
             if char_idx >= len(string):
                 break
-                
+
             # Get character bitmap
             if string[char_idx] in chars.chars:
                 char_bitmap = chars.chars[string[char_idx]]
-                
+
                 # Calculate position in the sheet
                 y_start = row * CHAR_HEIGHT
                 x_start = col * CHAR_WIDTH
-                
+
                 # Place character bitmap in the sheet
                 for y in range(CHAR_HEIGHT):
                     for x in range(CHAR_WIDTH):
                         bitmap_idx = y * CHAR_WIDTH + x
                         if bitmap_idx < len(char_bitmap):
                             target_sheet[y_start + y, x_start + x] = char_bitmap[bitmap_idx]
-                            
+
             char_idx += 1
-            
+
     return target_sheet
 
 # Create a dataset of text sheets and save sample images to a folder
@@ -368,7 +365,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             # Create target bitmap
             target = np.zeros((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
-            
+
             # Place pattern on sheet using shared function
             place_string_on_sheet(pattern, target)
 
@@ -383,7 +380,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     orig_dataset_size = len(dataset)
     val_size = int(validation_split * orig_dataset_size) - additional_val_samples  # Adjust to account for pattern samples
     train_size = orig_dataset_size - val_size
-    
+
     print(f"Dataset split: {train_size} training samples, {val_size + additional_val_samples} validation samples")
 
     # Split the original dataset
@@ -398,7 +395,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
     # Create dataloaders with fixed random seed
     g = torch.Generator()
     g.manual_seed(SEED)
-    
+
     # Optimize DataLoader for GPU usage
     train_loader = data.DataLoader(
         train_dataset,
@@ -616,7 +613,7 @@ def train_string_renderer(generate_only=False):
         print("Dataset generation complete. Skipping training.")
         return None
 
-    print("Training attention-based sheet renderer with reduced embedding dimensions...")
+    print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
     # Initialize model with sheet dimensions and native upscaling
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
@@ -624,10 +621,10 @@ def train_string_renderer(generate_only=False):
         sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
-    
+
     # Move model to device
     model = model.to(device)
-    
+
     # Adjust batch size based on hardware
     if torch.cuda.is_available():
         # Larger batch size for GPU
@@ -635,9 +632,9 @@ def train_string_renderer(generate_only=False):
     else:
         # Original batch size for CPU/MPS
         batch_size = 128
-        
+
     print(f"Using batch size {batch_size}")
-    
+
     model = train_attention_model(
         model,
         dataset,
