@@ -23,6 +23,7 @@ Architecture learnings:
   - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output), disregarding embedding dimensions (32 or 80). Maybe learned pos captures specific spatial relationships?
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
+  - Dropout regularization is needed for improved generalization
 
 Conv2d upsampling architecture experiments:
   - U-Net with skip connections: (val_loss: 0.011677 @ epoch 90)
