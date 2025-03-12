@@ -24,6 +24,7 @@ Architecture learnings:
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
   - Dropout regularization is needed for improved generalization
+  - (FP16) was tested and produced same quality outputs as FP32, but added implementation complexity
 
 Conv2d upsampling architecture experiments:
   - U-Net with skip connections: (val_loss: 0.011677 @ epoch 90)
