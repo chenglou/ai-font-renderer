@@ -62,17 +62,10 @@ import os
 import numpy as np
 import math
 from PIL import Image
-import chars  # using the custom font from ascii/chars.py
+import generate_font  # Import the font generation module
+from generate_font import SHEET_HEIGHT, SHEET_WIDTH
+from generate_font import MAX_CHARS_PER_SHEET
 
-# Global constants for sheet dimensions
-CHAR_HEIGHT = 8
-CHAR_WIDTH = 6
-SHEET_HEIGHT = 40  # 5 rows of characters
-SHEET_WIDTH = 120  # 20 characters per row
-# Calculate how many characters can fit on a sheet
-CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH
-MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
-MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS
 # Default upsampling factor for high-resolution output
 DEFAULT_SCALE_FACTOR = 4
 # Output directory for rendered test strings
@@ -218,165 +211,15 @@ class AttentionFontRenderer(nn.Module):
 
         return sheet
 
-# Generate random strings from the available characters
-def generate_random_string(length):
-    available_chars = list(chars.chars.keys())
-    return ''.join(random.choice(available_chars) for _ in range(length))
-
-# Place string characters as bitmap on a target sheet
-def place_string_on_sheet(string, target_sheet):
-    """
-    Places a string on a target sheet as bitmaps.
-
-    Args:
-        string (str): The string to render
-        target_sheet (numpy.ndarray): Target array to place characters on
-
-    Returns:
-        numpy.ndarray: Updated target sheet with rendered string
-    """
-    char_idx = 0
-    for row in range(MAX_ROWS):
-        if char_idx >= len(string):
-            break
-
-        for col in range(CHARS_PER_ROW):
-            if char_idx >= len(string):
-                break
-
-            # Get character bitmap
-            if string[char_idx] in chars.chars:
-                char_bitmap = chars.chars[string[char_idx]]
-
-                # Calculate position in the sheet
-                y_start = row * CHAR_HEIGHT
-                x_start = col * CHAR_WIDTH
-
-                # Place character bitmap in the sheet
-                for y in range(CHAR_HEIGHT):
-                    for x in range(CHAR_WIDTH):
-                        bitmap_idx = y * CHAR_WIDTH + x
-                        if bitmap_idx < len(char_bitmap):
-                            target_sheet[y_start + y, x_start + x] = char_bitmap[bitmap_idx]
-
-            char_idx += 1
-
-    return target_sheet
-
-# Create a dataset of text sheets and save sample images to a folder
-def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_PER_SHEET,
-                         sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, char_height=CHAR_HEIGHT, char_width=CHAR_WIDTH,
-                         save_samples=False, samples_dir="train_input", num_samples_to_save=10):
-    """Create a dataset of text sheets with consistent character grid dimensions."""
-    # Reset random seed for reproducible dataset generation
-    random.seed(SEED)
-
-    # Use the global constants
-    max_chars_per_sheet = MAX_CHARS_PER_SHEET
-
-    # Pre-allocate arrays for better performance
-    all_inputs = []
-    all_strings = []  # Store generated strings for reference
-    all_targets = np.zeros((num_samples, sheet_height, sheet_width), dtype=np.float32)
-
-    # Create output directory if saving samples
-    if save_samples:
-        os.makedirs(samples_dir, exist_ok=True)
-        print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
-
-    for sample_idx in range(num_samples):
-        # Generate a random string that fits in the sheet
-        length = random.randint(min_length, min(max_length, max_chars_per_sheet))
-        string = generate_random_string(length)
-        all_strings.append(string)
-
-        # Convert to ASCII codes
-        ascii_codes = [ord(c) for c in string]
-        all_inputs.append(ascii_codes)
-
-        # Place string on sheet using shared function
-        place_string_on_sheet(string, all_targets[sample_idx])
-
-        # Save this sample as an image if requested
-        if save_samples and sample_idx < num_samples_to_save:
-            # Convert binary sheet to image
-            img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
-            for y in range(sheet_height):
-                for x in range(sheet_width):
-                    if all_targets[sample_idx, y, x] >= 0.5:
-                        img[y, x] = 0
-
-            # Convert to PIL Image and save
-            pil_img = Image.fromarray(img)
-            filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
-            pil_img.save(filename, "BMP")
-
-            # Also save the input string for reference
-            with open(f"{samples_dir}/input_{sample_idx}_text.txt", "w") as f:
-                f.write(string)
-
-    # Pad sequences to max_length
-    max_len = max(len(s) for s in all_inputs)
-    padded_inputs = np.zeros((num_samples, max_len), dtype=np.int64)
-
-    for i, codes in enumerate(all_inputs):
-        # Pad inputs with zeros
-        padded_inputs[i, :len(codes)] = codes
-
-    # Convert to tensors
-    inputs_tensor = torch.tensor(padded_inputs, dtype=torch.long)
-    targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
-
-    if save_samples:
-        print(f"Dataset creation complete: {num_samples} samples with dimensions {sheet_height}x{sheet_width}")
-
-    return data.TensorDataset(inputs_tensor, targets_tensor)
+# Use the generate_font module to create datasets
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32,
                          early_stopping_patience=15, validation_split=0.1):
     # Create additional validation samples with specific patterns
-    # These will be added to the validation set to ensure model handles them well
-    additional_val_samples = 20  # Add 20 validation samples with specific patterns
-
-    # Create inputs with repeating patterns
-    pattern_inputs = []
-    pattern_targets = []
-
-    # Generate the patterns
-    patterns = [
-        "IIIIIIIIIIIIIIIIIIII",  # Repeating I's
-        "WWWWWWWWWWWWWWWWWWWW",  # Repeating W's
-        "IIIII IIIII IIIII IIIII",  # Groups of I's with spaces
-        "WWWWW WWWWW WWWWW WWWWW",  # Groups of W's with spaces
-        "IWIWIWIWIWIWIWIWIWIWI",  # Alternating I and W pattern
-        "                     ",
-    ]
-
-    for pattern in patterns:
-        for _ in range(additional_val_samples // len(patterns)):
-            # Convert to ASCII codes
-            ascii_codes = [ord(c) for c in pattern]
-            # Pad to max_length
-            if len(ascii_codes) < MAX_CHARS_PER_SHEET:
-                ascii_codes = ascii_codes + [0] * (MAX_CHARS_PER_SHEET - len(ascii_codes))
-
-            # Create input tensor
-            pattern_input = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
-            pattern_inputs.append(pattern_input)
-
-            # Create target bitmap
-            target = np.zeros((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
-
-            # Place pattern on sheet using shared function
-            place_string_on_sheet(pattern, target)
-
-            pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
-
-    # Concatenate pattern samples
-    pattern_inputs = torch.cat(pattern_inputs, dim=0)
-    pattern_targets = torch.cat(pattern_targets, dim=0)
-    pattern_dataset = data.TensorDataset(pattern_inputs, pattern_targets)
+    # Get challenging pattern dataset from generate_font
+    pattern_dataset = generate_font.generate_challenging_patterns()
+    additional_val_samples = len(pattern_dataset)  # Get the number of additional samples
 
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
@@ -601,7 +444,7 @@ def train_string_renderer(generate_only=False):
     print("Creating sheet dataset...")
 
     # Create the dataset and save samples to the train_input folder
-    dataset = create_string_dataset(
+    dataset = generate_font.create_string_dataset(
         num_samples=5000,  # Increased to 5000 samples for better learning
         min_length=10,
         max_length=MAX_CHARS_PER_SHEET,
@@ -674,6 +517,7 @@ if __name__ == '__main__':
     # Ensure output directory exists at start
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # Test strings for model evaluation
     test_strings = [
         "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
         "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
