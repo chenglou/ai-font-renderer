@@ -49,8 +49,8 @@ Performance optimizations:
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
 
-The model supports sheet-based rendering with a fixed output size (40x120 pixels by default),
-with 4x upsampling to produce high-resolution 160x480 output.
+The model supports sheet-based rendering with dimensions defined in generate_font.py,
+with configurable upsampling to produce high-resolution output.
 """
 
 import torch
@@ -97,18 +97,11 @@ else:
 print(f"Device: {device}")
 
 class AttentionFontRenderer(nn.Module):
-    def __init__(self, max_length=MAX_CHARS_PER_SHEET, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, scale_factor=DEFAULT_SCALE_FACTOR):
+    def __init__(self, max_length=MAX_CHARS_PER_SHEET, scale_factor=DEFAULT_SCALE_FACTOR):
         super().__init__()
         self.max_length = max_length
-        # Keep original dimensions for initial output
-        self.sheet_height = sheet_height
-        self.sheet_width = sheet_width
-        self.base_sheet_size = sheet_height * sheet_width
         # Store scale factor for later use
         self.scale_factor = scale_factor
-        # Final output dimensions after upsampling
-        self.output_height = sheet_height * scale_factor
-        self.output_width = sheet_width * scale_factor
 
         # Reduced embedding dimension (80 → 32)
         self.embedding_dim = 32  # Reduced from 80
@@ -128,7 +121,7 @@ class AttentionFontRenderer(nn.Module):
         self.dropout1 = nn.Dropout(0.15)
 
         # Generate base resolution bitmap first
-        self.fc_base = nn.Linear(64 * max_length, self.base_sheet_size)
+        self.fc_base = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
 
         # PixelShuffle approach for efficient upsampling
         # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
@@ -201,7 +194,7 @@ class AttentionFontRenderer(nn.Module):
         base_sheet = self.output_activation(self.fc_base(x))  # [batch_size, base_sheet_size]
 
         # Reshape to proper dimensions for upsampling
-        base_sheet = base_sheet.view(batch_size, 1, self.sheet_height, self.sheet_width)
+        base_sheet = base_sheet.view(batch_size, 1, SHEET_HEIGHT, SHEET_WIDTH)
 
         # Apply PixelShuffle upsampling layers
         sheet_with_channel = self.upsample(base_sheet)  # [batch_size, 1, output_height, output_width]
@@ -309,12 +302,12 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             # Since we're training with 4x upsampling, the model outputs will be 4x larger
             # We need to handle this by upsampling the targets
-            if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
+            if hasattr(model, 'scale_factor'):
                 # Create a tensor to hold the upsampled targets
                 batch_size = batch_targets.shape[0]
                 upsampled_targets = torch.nn.functional.interpolate(
                     batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                    size=(model.output_height, model.output_width),
+                    size=(SHEET_HEIGHT * model.scale_factor, SHEET_WIDTH * model.scale_factor),
                     mode='nearest'
                 ).squeeze(1)  # Remove channel dimension [B, H, W]
                 batch_targets = upsampled_targets
@@ -344,12 +337,12 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
                 # Since we're training with 4x upsampling, the model outputs will be 4x larger
                 # We need to handle this by upsampling the targets
-                if hasattr(model, 'output_height') and hasattr(model, 'output_width'):
+                if hasattr(model, 'scale_factor'):
                     # Create a tensor to hold the upsampled targets
                     batch_size = batch_targets.shape[0]
                     upsampled_targets = torch.nn.functional.interpolate(
                         batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                        size=(model.output_height, model.output_width),
+                        size=(SHEET_HEIGHT * model.scale_factor, SHEET_WIDTH * model.scale_factor),
                         mode='nearest'
                     ).squeeze(1)  # Remove channel dimension [B, H, W]
                     batch_targets = upsampled_targets
@@ -459,11 +452,9 @@ def train_string_renderer(generate_only=False):
         return None
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
-    # Initialize model with sheet dimensions and native upscaling
+    # Initialize model with native upscaling
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
-        sheet_height=SHEET_HEIGHT,
-        sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
 
@@ -498,11 +489,9 @@ def save_model(model, filename="font_renderer.pth"):
 
 def load_model(filename="font_renderer.pth"):
     """Load model weights from a file"""
-    # Initialize model with global constants
+    # Initialize model with defaults from imports
     model = AttentionFontRenderer(
         max_length=MAX_CHARS_PER_SHEET,
-        sheet_height=SHEET_HEIGHT,
-        sheet_width=SHEET_WIDTH,
         scale_factor=DEFAULT_SCALE_FACTOR
     )
     model.load_state_dict(torch.load(filename, map_location=device))
