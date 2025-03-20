@@ -1,5 +1,5 @@
-# 8x6 grid of ascii characters
-chars = {
+# Original 8x6 grid of ascii characters
+chars_original = {
   'A': [
     0,0,0,0,0,0,
     0,0,1,1,1,0,
@@ -271,4 +271,29 @@ chars = {
     0,0,0,0,0,0,
   ]
 }
+
+# Function to scale characters to 4x the original size
+def scale_4x(char_bitmap, original_width=6, original_height=8):
+    new_bitmap = []
+    
+    # Process each row
+    for y in range(original_height):
+        row_start = y * original_width
+        row = char_bitmap[row_start:row_start + original_width]
+        
+        # Create a new row with each pixel repeated 4 times horizontally
+        new_row = []
+        for pixel in row:
+            new_row.extend([pixel, pixel, pixel, pixel])  # Repeat 4x horizontally
+        
+        # Repeat this new row 4 times vertically
+        for _ in range(4):
+            new_bitmap.extend(new_row)
+    
+    return new_bitmap
+
+# Create 32x24 grid of ascii characters (4x larger than original 8x6)
+chars = {}
+for char, bitmap in chars_original.items():
+    chars[char] = scale_4x(bitmap)
 

@@ -16,7 +16,7 @@ Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets (5000+ samples) produce significantly better quality
-  - PixelShuffle upsampling significantly outperforms U-Net for font rendering, especially with repeating characters
+  - Direct FC output is used for bitmap rendering
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
   - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage (~60% reduction)
@@ -26,13 +26,10 @@ Architecture learnings:
   - Dropout regularization is needed for improved generalization
   - (FP16) was tested and produced same quality outputs as FP32, but added implementation complexity
 
-Conv2d upsampling architecture experiments:
-  - U-Net with skip connections: (val_loss: 0.011677 @ epoch 90)
-    - Ok for general quality but shows pathological behavior with repeating characters (I's and W's)
-    - Bottleneck layer loses character distinctiveness
-  - 2-steps 4× upsampling: (val_loss: 0.009904 @ epoch 93)
-  - Single-step 4× upsampling: (val_loss: 0.011142 @ epoch 95). Worse than 2-steps upsampling.
-  - PixelShuffle: best results (val_loss: 0.007169 @ epoch 41). Faster training convergence.
+Architecture simplification:
+  - Direct fully-connected output to bitmap provides simplest implementation
+  - No convolutional layers or complex upsampling needed
+  - Focus on attention mechanism for character relationships
 
 Challenging patterns requiring special attention:
   - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
@@ -49,8 +46,8 @@ Performance optimizations:
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
 
-The model supports sheet-based rendering with dimensions defined in generate_font.py,
-with configurable upsampling to produce high-resolution output.
+The model supports sheet-based rendering with dimensions defined in generate_font.py
+without any upsampling, producing output at native resolution.
 """
 
 import torch
@@ -66,8 +63,7 @@ import generate_font  # Import the font generation module
 from generate_font import SHEET_HEIGHT, SHEET_WIDTH
 from generate_font import MAX_CHARS_PER_SHEET
 
-# Default upsampling factor for high-resolution output
-DEFAULT_SCALE_FACTOR = 4
+# No upsampling - using original dimensions
 # Output directory for rendered test strings
 OUTPUT_DIR = "train_test_pixelshuffle_enhanced"
 
@@ -97,11 +93,9 @@ else:
 print(f"Device: {device}")
 
 class AttentionFontRenderer(nn.Module):
-    def __init__(self, max_length=MAX_CHARS_PER_SHEET, scale_factor=DEFAULT_SCALE_FACTOR):
+    def __init__(self, max_length=MAX_CHARS_PER_SHEET):
         super().__init__()
         self.max_length = max_length
-        # Store scale factor for later use
-        self.scale_factor = scale_factor
 
         # Reduced embedding dimension (80 → 32)
         self.embedding_dim = 32  # Reduced from 80
@@ -120,36 +114,9 @@ class AttentionFontRenderer(nn.Module):
         self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
         self.dropout1 = nn.Dropout(0.15)
 
-        # Generate base resolution bitmap first
-        self.fc_base = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
-
-        # PixelShuffle approach for efficient upsampling
-        # Uses sub-pixel convolution (pixel shuffle) which tends to learn sharper details
-        self.upsample = nn.Sequential(
-            # First extract features at base resolution
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-
-            # First pixel shuffle - 2x upscale
-            # Outputs 16 channels but expands to 64 first for the pixel shuffle
-            nn.Conv2d(16, 64, kernel_size=3, padding=1),
-            nn.PixelShuffle(2),  # 64 -> 16 channels, 2x spatial size
-            nn.ReLU(),
-
-            # Second pixel shuffle - another 2x upscale
-            # Outputs 4 channels but expands to 16 first for the pixel shuffle
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Extra processing
-            nn.ReLU(),
-
-            # Final pixelshuffle + refine
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.PixelShuffle(2),  # 16 -> 4 channels, 2x spatial size
-            nn.Conv2d(4, 1, kernel_size=3, padding=1),  # Final output
-            nn.Sigmoid()
-        )
-
+        # Generate bitmap directly
+        self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
+        
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
 
@@ -190,17 +157,11 @@ class AttentionFontRenderer(nn.Module):
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
-        # Generate the base resolution bitmap
-        base_sheet = self.output_activation(self.fc_base(x))  # [batch_size, base_sheet_size]
-
-        # Reshape to proper dimensions for upsampling
-        base_sheet = base_sheet.view(batch_size, 1, SHEET_HEIGHT, SHEET_WIDTH)
-
-        # Apply PixelShuffle upsampling layers
-        sheet_with_channel = self.upsample(base_sheet)  # [batch_size, 1, output_height, output_width]
-
-        # Remove the channel dimension for output
-        sheet = sheet_with_channel.squeeze(1)  # [batch_size, output_height, output_width]
+        # Generate the bitmap directly
+        sheet = self.output_activation(self.fc_output(x))  # [batch_size, SHEET_HEIGHT * SHEET_WIDTH]
+        
+        # Reshape to proper dimensions
+        sheet = sheet.view(batch_size, SHEET_HEIGHT, SHEET_WIDTH)
 
         return sheet
 
@@ -300,20 +261,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 
             # Model is working correctly, no need for debug shapes anymore
 
-            # Since we're training with 4x upsampling, the model outputs will be 4x larger
-            # We need to handle this by upsampling the targets
-            if hasattr(model, 'scale_factor'):
-                # Create a tensor to hold the upsampled targets
-                batch_size = batch_targets.shape[0]
-                upsampled_targets = torch.nn.functional.interpolate(
-                    batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                    size=(SHEET_HEIGHT * model.scale_factor, SHEET_WIDTH * model.scale_factor),
-                    mode='nearest'
-                ).squeeze(1)  # Remove channel dimension [B, H, W]
-                batch_targets = upsampled_targets
-            else:
-                # Standard case - just reshape
-                batch_targets = batch_targets.view(outputs.shape)
+            # Ensure targets and outputs have matching shapes
+            batch_targets = batch_targets.view(outputs.shape)
 
             loss = focal_bce_loss(outputs, batch_targets)
 
@@ -335,20 +284,8 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
                 # Forward pass
                 outputs = model(batch_inputs)
 
-                # Since we're training with 4x upsampling, the model outputs will be 4x larger
-                # We need to handle this by upsampling the targets
-                if hasattr(model, 'scale_factor'):
-                    # Create a tensor to hold the upsampled targets
-                    batch_size = batch_targets.shape[0]
-                    upsampled_targets = torch.nn.functional.interpolate(
-                        batch_targets.unsqueeze(1),  # Add channel dimension [B, 1, H, W]
-                        size=(SHEET_HEIGHT * model.scale_factor, SHEET_WIDTH * model.scale_factor),
-                        mode='nearest'
-                    ).squeeze(1)  # Remove channel dimension [B, H, W]
-                    batch_targets = upsampled_targets
-                else:
-                    # Standard case - just reshape
-                    batch_targets = batch_targets.view(outputs.shape)
+                # Ensure targets and outputs have matching shapes
+                batch_targets = batch_targets.view(outputs.shape)
 
                 val_loss = focal_bce_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
@@ -405,22 +342,18 @@ def render_strings(model, strings, output_dir):
         # Get model prediction
         x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0).to(device)
         with torch.no_grad():
-            sheet = model(x).squeeze(0)  # shape will be [output_height, output_width]
+            sheet = model(x).squeeze(0)  # shape will be [SHEET_HEIGHT, SHEET_WIDTH]
 
         # Convert prediction to numpy array
         if isinstance(sheet, torch.Tensor):
             sheet = sheet.detach().cpu().numpy()
 
-        # Get dimensions - handle both upsampled and regular outputs
-        sheet_height = sheet.shape[0]
-        sheet_width = sheet.shape[1]
-
         # Create a new image (with white background)
-        img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
+        img = np.ones((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.uint8) * 255
 
         # Fill in the image with the predicted bitmap
-        for row in range(sheet_height):
-            for col in range(sheet_width):
+        for row in range(SHEET_HEIGHT):
+            for col in range(SHEET_WIDTH):
                 # Set pixel black (0) if the value is >= 0.5; white otherwise
                 if sheet[row, col] >= 0.5:
                     img[row, col] = 0
@@ -452,10 +385,9 @@ def train_string_renderer(generate_only=False):
         return None
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
-    # Initialize model with native upscaling
+    # Initialize model
     model = AttentionFontRenderer(
-        max_length=MAX_CHARS_PER_SHEET,
-        scale_factor=DEFAULT_SCALE_FACTOR
+        max_length=MAX_CHARS_PER_SHEET
     )
 
     # Move model to device
@@ -491,8 +423,7 @@ def load_model(filename="font_renderer.pth"):
     """Load model weights from a file"""
     # Initialize model with defaults from imports
     model = AttentionFontRenderer(
-        max_length=MAX_CHARS_PER_SHEET,
-        scale_factor=DEFAULT_SCALE_FACTOR
+        max_length=MAX_CHARS_PER_SHEET
     )
     model.load_state_dict(torch.load(filename, map_location=device))
     model = model.to(device)

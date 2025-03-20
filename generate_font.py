@@ -21,10 +21,10 @@ import torch.utils.data as data
 import chars  # using the custom font from chars.py
 
 # Global constants for sheet dimensions
-CHAR_HEIGHT = 8
-CHAR_WIDTH = 6
-SHEET_HEIGHT = 40  # 5 rows of characters
-SHEET_WIDTH = 120  # 20 characters per row
+CHAR_HEIGHT = 32  # 4x from original 8
+CHAR_WIDTH = 24   # 4x from original 6
+SHEET_HEIGHT = 160 # 4x from original 40 (5 rows of characters) 
+SHEET_WIDTH = 480 # 4x from original 120 (20 characters per row)
 # Calculate how many characters can fit on a sheet
 CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH
 MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
