@@ -14,19 +14,27 @@ Usage:
 
 import random
 import os
+import math
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import torch.utils.data as data
-import chars  # using the custom font from chars.py
 
-# Global constants for sheet dimensions
-CHAR_HEIGHT = 32  # 4x from original 8
-CHAR_WIDTH = 24   # 4x from original 6
-SHEET_HEIGHT = 160 # 4x from original 40 (5 rows of characters) 
-SHEET_WIDTH = 480 # 4x from original 120 (20 characters per row)
-# Calculate how many characters can fit on a sheet
-CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH
+# Fira Code font configuration
+FONT_PATH = "FiraCode-Retina.ttf"
+FONT_SIZE = 30
+font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+
+# Calculate dimensions based on the font
+CHAR_WIDTH = font.getbbox("M")[2]
+LINE_HEIGHT = math.ceil(font.getbbox("Mjpqy")[3] * 0.9)
+CHAR_HEIGHT = LINE_HEIGHT
+
+# Sheet dimensions
+SHEET_WIDTH = 480  # Keep this fixed as specified
+CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH  # Integer division rounds down
+NUM_ROWS = 5
+SHEET_HEIGHT = math.ceil(LINE_HEIGHT * NUM_ROWS)  # Calculate height from line height
 MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
 MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS
 
@@ -36,15 +44,15 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# Generate random strings from the available characters
+# Generate random strings (uppercase and space only)
 def generate_random_string(length):
-    available_chars = list(chars.chars.keys())
+    available_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ "
     return ''.join(random.choice(available_chars) for _ in range(length))
 
-# Place string characters as bitmap on a target sheet
+# Place string characters as bitmap on a target sheet using the TTF font
 def place_string_on_sheet(string, target_sheet):
     """
-    Places a string on a target sheet as bitmaps.
+    Places a string on a target sheet as bitmaps using the FiraCode font.
 
     Args:
         string (str): The string to render
@@ -53,31 +61,38 @@ def place_string_on_sheet(string, target_sheet):
     Returns:
         numpy.ndarray: Updated target sheet with rendered string
     """
+    # Create a temporary image to render the text
+    temp_img = Image.new('L', (SHEET_WIDTH, SHEET_HEIGHT), 255)  # White background
+    draw = ImageDraw.Draw(temp_img)
+
     char_idx = 0
     for row in range(MAX_ROWS):
         if char_idx >= len(string):
             break
 
+        y_pos = row * CHAR_HEIGHT
+
         for col in range(CHARS_PER_ROW):
             if char_idx >= len(string):
                 break
 
-            # Get character bitmap
-            if string[char_idx] in chars.chars:
-                char_bitmap = chars.chars[string[char_idx]]
+            x_pos = col * CHAR_WIDTH
 
-                # Calculate position in the sheet
-                y_start = row * CHAR_HEIGHT
-                x_start = col * CHAR_WIDTH
-
-                # Place character bitmap in the sheet
-                for y in range(CHAR_HEIGHT):
-                    for x in range(CHAR_WIDTH):
-                        bitmap_idx = y * CHAR_WIDTH + x
-                        if bitmap_idx < len(char_bitmap):
-                            target_sheet[y_start + y, x_start + x] = char_bitmap[bitmap_idx]
+            # Draw the character at the position
+            if string[char_idx] != '':
+                draw.text((x_pos, y_pos), string[char_idx], font=font, fill=0)  # Black text
 
             char_idx += 1
+
+    # Convert the image to a numpy array
+    img_array = np.array(temp_img)
+
+    # Convert to binary where black pixels (0) become 1 and white pixels (255) become 0
+    # This maintains compatibility with the existing model (1 = black)
+    binary_array = (img_array < 128).astype(np.float32)
+
+    # Copy to target sheet
+    target_sheet[:] = binary_array
 
     return target_sheet
 
@@ -117,12 +132,9 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_
 
         # Save this sample as an image if requested
         if save_samples and sample_idx < num_samples_to_save:
-            # Convert binary sheet to image
+            # Convert binary sheet to image (255 for white, 0 for black)
             img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
-            for y in range(sheet_height):
-                for x in range(sheet_width):
-                    if all_targets[sample_idx, y, x] >= 0.5:
-                        img[y, x] = 0
+            img[all_targets[sample_idx] >= 0.5] = 0  # Set black pixels where target has value 1
 
             # Convert to PIL Image and save
             pil_img = Image.fromarray(img)
@@ -152,7 +164,7 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_
 
 def generate_challenging_patterns():
     """Generate a dataset with challenging patterns for validation testing"""
-    
+
     patterns = [
         "IIIIIIIIIIIIIIIIIIII",  # Repeating I's
         "WWWWWWWWWWWWWWWWWWWW",  # Repeating W's
@@ -161,11 +173,11 @@ def generate_challenging_patterns():
         "IWIWIWIWIWIWIWIWIWIWI",  # Alternating I and W pattern
         "                     ",  # Just spaces
     ]
-    
+
     # Prepare tensors for patterns
     pattern_inputs = []
     pattern_targets = []
-    
+
     # Create dataset from patterns
     for idx, pattern in enumerate(patterns):
         # Convert to ASCII codes
@@ -185,20 +197,19 @@ def generate_challenging_patterns():
         place_string_on_sheet(pattern, target)
 
         pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
-        
+
         # Save these pattern samples for visualization
+        # Since place_string_on_sheet now directly generates a binary array,
+        # we convert it to an image format (255 for white, 0 for black)
         img = np.ones((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.uint8) * 255
-        for y in range(SHEET_HEIGHT):
-            for x in range(SHEET_WIDTH):
-                if target[y, x] >= 0.5:
-                    img[y, x] = 0
+        img[target >= 0.5] = 0  # Set black pixels where target has value 1
 
         # Save the test pattern
         os.makedirs("train_input", exist_ok=True)
         pil_img = Image.fromarray(img)
         filename = f"train_input/test_{idx}_{pattern.replace(' ', '_')}.bmp"
         pil_img.save(filename, "BMP")
-        
+
         # Save the pattern text
         with open(f"train_input/test_{idx}_text.txt", "w") as f:
             f.write(pattern)
@@ -211,10 +222,12 @@ def generate_challenging_patterns():
 def create_dataset_metadata(samples_dir="train_input"):
     """Create a metadata file with information about the dataset"""
     os.makedirs(samples_dir, exist_ok=True)
-    
+
     with open(f"{samples_dir}/dataset_metadata.txt", "w") as f:
         f.write("AI Font Renderer Dataset\n")
         f.write("========================\n\n")
+        f.write(f"Font: {FONT_PATH}\n")
+        f.write(f"Font size: {FONT_SIZE}\n")
         f.write(f"Character dimensions: {CHAR_WIDTH}x{CHAR_HEIGHT}\n")
         f.write(f"Sheet dimensions: {SHEET_WIDTH}x{SHEET_HEIGHT}\n")
         f.write(f"Characters per row: {CHARS_PER_ROW}\n")
@@ -225,21 +238,21 @@ def create_dataset_metadata(samples_dir="train_input"):
 
 if __name__ == "__main__":
     print("Generating font bitmap training data...")
-    
+
     # Create the dataset metadata
     create_dataset_metadata()
-    
+
     # Create the main training dataset
     dataset = create_string_dataset(
         num_samples=5000,  # Generate 5000 samples
         min_length=10,
         max_length=MAX_CHARS_PER_SHEET,
         save_samples=True,  # Save all samples
-        samples_dir="train_input", 
+        samples_dir="train_input",
         num_samples_to_save=20  # Save 20 samples for reference
     )
-    
+
     # Generate and save challenging test patterns
     generate_challenging_patterns()
-    
+
     print("Dataset generation complete. Check the train_input/ directory.")

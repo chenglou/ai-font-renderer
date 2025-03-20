@@ -15,7 +15,7 @@ Usage:
 Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
-  - Larger datasets produce significantly better quality. Loss was ~0.002 with 5k, 0.000193 with 15k.
+  - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k.
   - Direct FC output is used for bitmap rendering
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
