@@ -292,7 +292,27 @@ def scale_4x(char_bitmap, original_width=6, original_height=8):
     
     return new_bitmap
 
-# Create 32x24 grid of ascii characters (4x larger than original 8x6)
+# Function to scale characters to 8x the original size
+def scale_8x(char_bitmap, original_width=6, original_height=8):
+    new_bitmap = []
+    
+    # Process each row
+    for y in range(original_height):
+        row_start = y * original_width
+        row = char_bitmap[row_start:row_start + original_width]
+        
+        # Create a new row with each pixel repeated 8 times horizontally
+        new_row = []
+        for pixel in row:
+            new_row.extend([pixel] * 8)  # Repeat 8x horizontally
+        
+        # Repeat this new row 8 times vertically
+        for _ in range(8):
+            new_bitmap.extend(new_row)
+    
+    return new_bitmap
+
+# Create 64x48 grid of ascii characters (8x larger than original 8x6)
 chars = {}
 for char, bitmap in chars_original.items():
     chars[char] = scale_4x(bitmap)
