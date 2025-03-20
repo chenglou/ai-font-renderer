@@ -15,7 +15,7 @@ Usage:
 Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
-  - Larger datasets (5000+ samples) produce significantly better quality
+  - Larger datasets produce significantly better quality. Loss was ~0.002 with 5k, 0.000193 with 15k.
   - Direct FC output is used for bitmap rendering
   - Focal loss works better than standard BCE loss for this task (confirmed)
   - Early stopping based on validation helps prevent overfitting (confirmed)
@@ -116,7 +116,7 @@ class AttentionFontRenderer(nn.Module):
 
         # Generate bitmap directly
         self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
-        
+
         self.activation = nn.ReLU()
         self.output_activation = nn.Sigmoid()
 
@@ -159,7 +159,7 @@ class AttentionFontRenderer(nn.Module):
 
         # Generate the bitmap directly
         sheet = self.output_activation(self.fc_output(x))  # [batch_size, SHEET_HEIGHT * SHEET_WIDTH]
-        
+
         # Reshape to proper dimensions
         sheet = sheet.view(batch_size, SHEET_HEIGHT, SHEET_WIDTH)
 
@@ -371,7 +371,7 @@ def train_string_renderer(generate_only=False):
 
     # Create the dataset and save samples to the train_input folder
     dataset = generate_font.create_string_dataset(
-        num_samples=5000,  # Increased to 5000 samples for better learning
+        num_samples=15000,  # Increased to 5000 samples for better learning
         min_length=10,
         max_length=MAX_CHARS_PER_SHEET,
         save_samples=True,  # Save sample images
