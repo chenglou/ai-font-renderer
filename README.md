@@ -9,4 +9,4 @@ pip install -r requirements.txt
 python model.py --train
 ```
 
-Output's in `train_test/`
+Check the output folder for the bitmap results.

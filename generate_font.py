@@ -1,10 +1,10 @@
 """
-This file implements utilities for generating font bitmap training data.
+This file implements utilities for generating font bitmap training data using a font
 
-The module extracts the font generation logic from model.py, providing functions for:
+The module provides functions for:
 - Generating random strings
-- Placing characters on bitmap sheets
-- Creating training datasets
+- Rendering characters using a font
+- Creating training datasets with bitmap font images
 - Saving sample images
 
 Usage:
@@ -19,6 +19,32 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 import torch.utils.data as data
+
+def binary_array_to_image(binary_array, output_path=None):
+    """
+    Convert a binary array (where 1=black, 0=white) to a PIL Image.
+
+    Args:
+        binary_array (numpy.ndarray): A 2D array with values 0.0-1.0 where 1.0 represents black
+        output_path (str, optional): If provided, save the image to this path
+
+    Returns:
+        PIL.Image: The converted image object
+    """
+    # Convert binary array to image format (255 for white, 0 for black)
+    img = np.ones(binary_array.shape, dtype=np.uint8) * 255
+    img[binary_array >= 0.5] = 0  # Set black pixels where binary value is >= 0.5
+
+    # Convert to PIL Image
+    pil_img = Image.fromarray(img)
+
+    # Save if path is provided
+    if output_path:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+        pil_img.save(output_path, "BMP")
+
+    return pil_img
 
 # Fira Code font configuration
 FONT_PATH = "FiraCode-Retina.ttf"
@@ -132,14 +158,9 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_
 
         # Save this sample as an image if requested
         if save_samples and sample_idx < num_samples_to_save:
-            # Convert binary sheet to image (255 for white, 0 for black)
-            img = np.ones((sheet_height, sheet_width), dtype=np.uint8) * 255
-            img[all_targets[sample_idx] >= 0.5] = 0  # Set black pixels where target has value 1
-
-            # Convert to PIL Image and save
-            pil_img = Image.fromarray(img)
+            # Convert binary sheet to image and save it
             filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
-            pil_img.save(filename, "BMP")
+            binary_array_to_image(all_targets[sample_idx], output_path=filename)
 
             # Also save the input string for reference
             with open(f"{samples_dir}/input_{sample_idx}_text.txt", "w") as f:
@@ -199,16 +220,9 @@ def generate_challenging_patterns():
         pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
 
         # Save these pattern samples for visualization
-        # Since place_string_on_sheet now directly generates a binary array,
-        # we convert it to an image format (255 for white, 0 for black)
-        img = np.ones((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.uint8) * 255
-        img[target >= 0.5] = 0  # Set black pixels where target has value 1
-
-        # Save the test pattern
         os.makedirs("train_input", exist_ok=True)
-        pil_img = Image.fromarray(img)
         filename = f"train_input/test_{idx}_{pattern.replace(' ', '_')}.bmp"
-        pil_img.save(filename, "BMP")
+        binary_array_to_image(target, output_path=filename)
 
         # Save the pattern text
         with open(f"train_input/test_{idx}_text.txt", "w") as f:

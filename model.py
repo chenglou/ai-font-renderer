@@ -9,7 +9,6 @@ creating a coherent font appearance across a string. It includes a complete pipe
 
 Usage:
   - Run with --train flag to train a new model: python model.py --train
-  - Run with --generate-samples flag to create sample training data: python model.py --generate-samples
   - Run without arguments to load a saved model and render sample strings: python model.py
 
 Architecture learnings:
@@ -57,8 +56,6 @@ import torch.utils.data as data
 import random
 import os
 import numpy as np
-import math
-from PIL import Image
 import generate_font  # Import the font generation module
 from generate_font import SHEET_HEIGHT, SHEET_WIDTH
 from generate_font import MAX_CHARS_PER_SHEET
@@ -326,6 +323,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
 # Function to save rendered sheets as BMP images
 def render_strings(model, strings, output_dir):
     """Render a list of strings as BMP images"""
+    os.makedirs(output_dir, exist_ok=True)
 
     for idx, string in enumerate(strings):
         # Cap string length to model's max_length
@@ -333,9 +331,8 @@ def render_strings(model, strings, output_dir):
             string = string[:model.max_length]
             print(f"Warning: String truncated to {model.max_length} characters: {string}")
 
-        # Convert to ASCII codes
+        # Convert to ASCII codes and pad
         ascii_codes = [ord(c) for c in string]
-        # Pad if necessary
         if len(ascii_codes) < model.max_length:
             ascii_codes = ascii_codes + [0] * (model.max_length - len(ascii_codes))
 
@@ -344,45 +341,29 @@ def render_strings(model, strings, output_dir):
         with torch.no_grad():
             sheet = model(x).squeeze(0)  # shape will be [SHEET_HEIGHT, SHEET_WIDTH]
 
-        # Convert prediction to numpy array
+        # Convert to numpy if needed
         if isinstance(sheet, torch.Tensor):
             sheet = sheet.detach().cpu().numpy()
 
-        # Create a new image (with white background)
-        img = np.ones((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.uint8) * 255
-
-        # Fill in the image with the predicted bitmap
-        for row in range(SHEET_HEIGHT):
-            for col in range(SHEET_WIDTH):
-                # Set pixel black (0) if the value is >= 0.5; white otherwise
-                if sheet[row, col] >= 0.5:
-                    img[row, col] = 0
-
-        # Convert to PIL Image and save
-        pil_img = Image.fromarray(img)
+        # Convert binary array to image and save
         filename = f"{output_dir}/string_{idx}.bmp"
-        pil_img.save(filename, "BMP")
+        generate_font.binary_array_to_image(sheet, output_path=filename)
 
     print(f"Saved {len(strings)} rendered strings to {output_dir}/")
 
 # Train the sheet-based renderer
-def train_string_renderer(generate_only=False):
+def train_string_renderer():
     print("Creating sheet dataset...")
 
     # Create the dataset and save samples to the train_input folder
     dataset = generate_font.create_string_dataset(
-        num_samples=15000,  # Increased to 5000 samples for better learning
+        num_samples=15000,  # 15000 samples for better learning
         min_length=10,
         max_length=MAX_CHARS_PER_SHEET,
         save_samples=True,  # Save sample images
         samples_dir="train_input",
         num_samples_to_save=10  # Save 10 samples for reference
     )
-
-    # If generate_only flag is set, return without training
-    if generate_only:
-        print("Dataset generation complete. Skipping training.")
-        return None
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
     # Initialize model
@@ -460,14 +441,9 @@ if __name__ == '__main__':
 
             # Render test strings
             render_strings(model, test_strings, output_dir=OUTPUT_DIR)
-        elif sys.argv[1] == "--generate-samples":
-            # Generate samples only without training
-            train_string_renderer(generate_only=True)
-            print("Sample generation complete. Check the train_input/ directory.")
-            sys.exit(0)
         else:
             print(f"Unknown option: {sys.argv[1]}")
-            print("Available options: --train, --generate-samples")
+            print("Available options: --train")
             sys.exit(1)
     else:
         # Render mode: load model if available, otherwise train first
