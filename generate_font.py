@@ -91,24 +91,18 @@ def place_string_on_sheet(string, target_sheet):
     temp_img = Image.new('L', (SHEET_WIDTH, SHEET_HEIGHT), 255)  # White background
     draw = ImageDraw.Draw(temp_img)
 
-    char_idx = 0
-    for row in range(MAX_ROWS):
-        if char_idx >= len(string):
-            break
+    # Format string with line breaks to fit width
+    formatted_text = ""
+    line_chars = 0
+    for char in string:
+        if line_chars >= CHARS_PER_ROW:
+            formatted_text += "\n"
+            line_chars = 0
+        formatted_text += char
+        line_chars += 1
 
-        y_pos = row * CHAR_HEIGHT
-
-        for col in range(CHARS_PER_ROW):
-            if char_idx >= len(string):
-                break
-
-            x_pos = col * CHAR_WIDTH
-
-            # Draw the character at the position
-            if string[char_idx] != '':
-                draw.text((x_pos, y_pos), string[char_idx], font=font, fill=0)  # Black text
-
-            char_idx += 1
+    # Draw the entire string at once with proper line breaks
+    draw.text((0, 0), formatted_text, font=font, fill=0)  # Black text
 
     # Convert the image to a numpy array
     img_array = np.array(temp_img)
