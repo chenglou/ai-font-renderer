@@ -377,7 +377,7 @@ def train_string_renderer():
     # Adjust batch size based on hardware
     if torch.cuda.is_available():
         # Larger batch size for GPU
-        batch_size = 256  # CUDA can handle larger batches
+        batch_size = 512  # CUDA can handle larger batches
     else:
         # Original batch size for CPU/MPS
         batch_size = 128
