@@ -123,29 +123,22 @@ def place_string_on_sheet(string, target_sheet):
     return target_sheet
 
 # Create a dataset of text sheets and save sample images to a folder
-def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_PER_SHEET,
-                         sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, char_height=CHAR_HEIGHT, char_width=CHAR_WIDTH,
-                         save_samples=False, samples_dir="train_input", num_samples_to_save=10):
+def create_string_dataset(num_samples=1000, min_length=20, samples_dir="train_input", num_samples_to_save=10):
     """Create a dataset of text sheets with consistent character grid dimensions."""
     # Reset random seed for reproducible dataset generation
     random.seed(SEED)
 
-    # Use the global constants
-    max_chars_per_sheet = MAX_CHARS_PER_SHEET
-
     # Pre-allocate arrays for better performance
     all_inputs = []
     all_strings = []  # Store generated strings for reference
-    all_targets = np.zeros((num_samples, sheet_height, sheet_width), dtype=np.float32)
+    all_targets = np.zeros((num_samples, SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
 
-    # Create output directory if saving samples
-    if save_samples:
-        os.makedirs(samples_dir, exist_ok=True)
-        print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
+    os.makedirs(samples_dir, exist_ok=True)
+    print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
 
     for sample_idx in range(num_samples):
         # Generate a random string that fits in the sheet
-        length = random.randint(min_length, min(max_length, max_chars_per_sheet))
+        length = random.randint(min_length, MAX_CHARS_PER_SHEET)
         string = generate_random_string(length)
         all_strings.append(string)
 
@@ -157,14 +150,10 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_
         place_string_on_sheet(string, all_targets[sample_idx])
 
         # Save this sample as an image if requested
-        if save_samples and sample_idx < num_samples_to_save:
+        if sample_idx < num_samples_to_save:
             # Convert binary sheet to image and save it
             filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
             binary_array_to_image(all_targets[sample_idx], output_path=filename)
-
-            # Also save the input string for reference
-            with open(f"{samples_dir}/input_{sample_idx}_text.txt", "w") as f:
-                f.write(string)
 
     # Pad sequences to max_length
     max_len = max(len(s) for s in all_inputs)
@@ -178,8 +167,7 @@ def create_string_dataset(num_samples=1000, min_length=20, max_length=MAX_CHARS_
     inputs_tensor = torch.tensor(padded_inputs, dtype=torch.long)
     targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
 
-    if save_samples:
-        print(f"Dataset creation complete: {num_samples} samples with dimensions {sheet_height}x{sheet_width}")
+    print(f"Dataset creation complete: {num_samples} samples with dimensions {SHEET_HEIGHT}x{SHEET_WIDTH}")
 
     return data.TensorDataset(inputs_tensor, targets_tensor)
 
@@ -224,10 +212,6 @@ def generate_challenging_patterns():
         filename = f"train_input/test_{idx}_{pattern.replace(' ', '_')}.bmp"
         binary_array_to_image(target, output_path=filename)
 
-        # Save the pattern text
-        with open(f"train_input/test_{idx}_text.txt", "w") as f:
-            f.write(pattern)
-
     # Concatenate and return dataset
     pattern_inputs = torch.cat(pattern_inputs, dim=0)
     pattern_targets = torch.cat(pattern_targets, dim=0)
@@ -260,8 +244,6 @@ if __name__ == "__main__":
     dataset = create_string_dataset(
         num_samples=5000,  # Generate 5000 samples
         min_length=10,
-        max_length=MAX_CHARS_PER_SHEET,
-        save_samples=True,  # Save all samples
         samples_dir="train_input",
         num_samples_to_save=20  # Save 20 samples for reference
     )

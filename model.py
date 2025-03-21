@@ -359,17 +359,13 @@ def train_string_renderer():
     dataset = generate_font.create_string_dataset(
         num_samples=15000,  # 15000 samples for better learning
         min_length=10,
-        max_length=MAX_CHARS_PER_SHEET,
-        save_samples=True,  # Save sample images
         samples_dir="train_input",
         num_samples_to_save=10  # Save 10 samples for reference
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
     # Initialize model
-    model = AttentionFontRenderer(
-        max_length=MAX_CHARS_PER_SHEET
-    )
+    model = AttentionFontRenderer(max_length=MAX_CHARS_PER_SHEET)
 
     # Move model to device
     model = model.to(device)
