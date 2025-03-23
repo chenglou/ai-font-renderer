@@ -212,19 +212,20 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         pin_memory=True
     )
 
-    # Focal loss - known to work well for this task
-    def focal_bce_loss(pred, target, gamma=2.0, alpha=0.25):
-        bce_loss = nn.functional.binary_cross_entropy(pred, target, reduction='none')
-
-        # Calculate focal weights - focus on hard examples
-        pt = torch.where(target > 0.5, pred, 1 - pred)
-        focal_weight = (1 - pt) ** gamma
-
-        # Alpha weighting for positive pixels (text)
-        alpha_weight = torch.where(target > 0.5, alpha, 1 - alpha)
-
+    # MSE loss with focal weighting for grayscale targets
+    def focal_mse_loss(pred, target, gamma=2.0, alpha=0.25):
+        # Use MSE loss for grayscale values instead of BCE
+        mse_loss = nn.functional.mse_loss(pred, target, reduction='none')
+        
+        # Calculate error magnitude to focus on larger errors
+        error_magnitude = torch.abs(pred - target)
+        focal_weight = (error_magnitude) ** gamma
+        
+        # Alpha weighting for darker pixels (text regions)
+        alpha_weight = torch.where(target < 0.5, alpha, 1 - alpha)
+        
         # Combine weights and take mean
-        loss = focal_weight * alpha_weight * bce_loss
+        loss = focal_weight * alpha_weight * mse_loss
         return loss.mean()
 
     # AdamW optimizer with moderate weight decay
@@ -261,7 +262,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
             # Ensure targets and outputs have matching shapes
             batch_targets = batch_targets.view(outputs.shape)
 
-            loss = focal_bce_loss(outputs, batch_targets)
+            loss = focal_mse_loss(outputs, batch_targets)
 
             # Backward pass and optimization
             loss.backward()
@@ -284,7 +285,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
                 # Ensure targets and outputs have matching shapes
                 batch_targets = batch_targets.view(outputs.shape)
 
-                val_loss = focal_bce_loss(outputs, batch_targets)
+                val_loss = focal_mse_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
 
         # Calculate average losses

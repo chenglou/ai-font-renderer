@@ -22,18 +22,18 @@ import torch.utils.data as data
 
 def binary_array_to_image(binary_array, output_path=None):
     """
-    Convert a binary array (where 1=black, 0=white) to a PIL Image.
+    Convert a grayscale array (where 0=black, 1=white) to a PIL Image.
 
     Args:
-        binary_array (numpy.ndarray): A 2D array with values 0.0-1.0 where 1.0 represents black
+        binary_array (numpy.ndarray): A 2D array with values 0.0-1.0 where 0.0 represents black and 1.0 represents white
         output_path (str, optional): If provided, save the image to this path
 
     Returns:
         PIL.Image: The converted image object
     """
-    # Convert binary array to image format (255 for white, 0 for black)
-    img = np.ones(binary_array.shape, dtype=np.uint8) * 255
-    img[binary_array >= 0.5] = 0  # Set black pixels where binary value is >= 0.5
+    # Convert grayscale array to image format (255 for white, 0 for black)
+    # Scale from 0.0-1.0 to 0-255
+    img = (binary_array * 255).astype(np.uint8)
 
     # Convert to PIL Image
     pil_img = Image.fromarray(img)
@@ -107,12 +107,12 @@ def place_string_on_sheet(string, target_sheet):
     # Convert the image to a numpy array
     img_array = np.array(temp_img)
 
-    # Convert to binary where black pixels (0) become 1 and white pixels (255) become 0
-    # This maintains compatibility with the existing model (1 = black)
-    binary_array = (img_array < 128).astype(np.float32)
+    # Convert to grayscale values where black pixels (0) become 0.0 and white pixels (255) become 1.0
+    # with intermediate grayscale values preserved
+    grayscale_array = (img_array / 255.0).astype(np.float32)
 
     # Copy to target sheet
-    target_sheet[:] = binary_array
+    target_sheet[:] = grayscale_array
 
     return target_sheet
 
