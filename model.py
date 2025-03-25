@@ -16,10 +16,11 @@ Architecture learnings:
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k.
   - Direct FC output is used for bitmap rendering
-  - Focal loss works better than standard BCE loss for this task (confirmed)
+  - For grayscale output, standard MSE loss works better than focal or custom losses
+  - Sigmoid activation with scaling factor of 1.2 provides good balance of contrast and antialiasing
   - Early stopping based on validation helps prevent overfitting (confirmed)
   - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage (~60% reduction)
-  - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output), disregarding embedding dimensions (32 or 80). Maybe learned pos captures specific spatial relationships?
+  - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output)
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
   - Dropout regularization is needed for improved generalization
@@ -29,6 +30,7 @@ Architecture simplification:
   - Direct fully-connected output to bitmap provides simplest implementation
   - No convolutional layers or complex upsampling needed
   - Focus on attention mechanism for character relationships
+  - Grayscale rendering preserves antialiasing in the font output
 
 Challenging patterns requiring special attention:
   - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
@@ -37,8 +39,8 @@ Challenging patterns requiring special attention:
 
 Performance optimizations:
   - Hardware acceleration with MPS (Metal Performance Shaders) gives ~60% speedup on M-series Macs
-  - Larger batch sizes (128) improve training efficiency and output quality
-  - Default learning rate (0.001) with batch size 128 provides best speed/quality balance
+  - Larger batch sizes (256 for CPU/MPS, 1024 for GPU) significantly improve training efficiency
+  - Scaled learning rate (0.0005 with larger batches) maintains stability while improving convergence
   - Training time ~4-5 minutes on M2 Pro with these optimizations (vs 26+ minutes without)
   - Reduced model complexity (removing FC layers) further improves training efficiency
 
@@ -115,7 +117,8 @@ class AttentionFontRenderer(nn.Module):
         self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
 
         self.activation = nn.ReLU()
-        self.output_activation = nn.Sigmoid()
+        # Use sigmoid with scaling factor of 1.2 for increased contrast
+        self.output_activation = lambda x: torch.sigmoid(x * 1.2)
 
     def forward(self, x):
         # x shape: [batch_size, seq_len], containing ASCII codes
@@ -165,7 +168,7 @@ class AttentionFontRenderer(nn.Module):
 # Use the generate_font module to create datasets
 
 # Balanced training function with focal loss and moderate regularization
-def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=32,
+def train_attention_model(model, dataset, num_epochs=500, lr=0.0005, batch_size=32,
                          early_stopping_patience=15, validation_split=0.1):
     # Create additional validation samples with specific patterns
     # Get challenging pattern dataset from generate_font
@@ -212,21 +215,11 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.001, batch_size=3
         pin_memory=True
     )
 
-    # MSE loss with focal weighting for grayscale targets
-    def focal_mse_loss(pred, target, gamma=2.0, alpha=0.25):
-        # Use MSE loss for grayscale values instead of BCE
-        mse_loss = nn.functional.mse_loss(pred, target, reduction='none')
-        
-        # Calculate error magnitude to focus on larger errors
-        error_magnitude = torch.abs(pred - target)
-        focal_weight = (error_magnitude) ** gamma
-        
-        # Alpha weighting for darker pixels (text regions)
-        alpha_weight = torch.where(target < 0.5, alpha, 1 - alpha)
-        
-        # Combine weights and take mean
-        loss = focal_weight * alpha_weight * mse_loss
-        return loss.mean()
+    # Plain MSE loss for grayscale values
+    def focal_mse_loss(pred, target, contrast_factor=None):
+        # Using pure MSE loss for grayscale
+        # Keeping function name for compatibility
+        return nn.functional.mse_loss(pred, target)
 
     # AdamW optimizer with moderate weight decay
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -374,17 +367,17 @@ def train_string_renderer():
     # Adjust batch size based on hardware
     if torch.cuda.is_available():
         # Larger batch size for GPU
-        batch_size = 512  # CUDA can handle larger batches
+        batch_size = 1024  # Double the previous GPU batch size
     else:
         # Original batch size for CPU/MPS
-        batch_size = 128
+        batch_size = 256  # Double the previous CPU/MPS batch size
 
     print(f"Using batch size {batch_size}")
 
     model = train_attention_model(
         model,
         dataset,
-        num_epochs=100,
+        num_epochs=120,
         batch_size=batch_size,
         early_stopping_patience=15,  # More patience to see learning curve
         validation_split=0.1  # 10% validation data
