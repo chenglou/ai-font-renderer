@@ -14,7 +14,7 @@ Usage:
 Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
-  - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k.
+  - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k, and further improved with 25k samples.
   - Direct FC output is used for bitmap rendering
   - For grayscale output, standard MSE loss works better than focal or custom losses
   - Sigmoid activation with scaling factor of 1.2 provides good balance of contrast and antialiasing
@@ -288,18 +288,23 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.0005, batch_size=
         # Update learning rate based on validation performance
         scheduler.step(avg_val_loss)
 
-        # Print progress
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
-
         # Early stopping check
-        if avg_val_loss < best_val_loss:
+        is_best = avg_val_loss < best_val_loss
+        if is_best:
             best_val_loss = avg_val_loss
             patience_counter = 0
             best_model_state = model.state_dict().copy()
-            print(f"Epoch {epoch}, New best validation loss: {best_val_loss:.6f}")
         else:
             patience_counter += 1
+            
+        # Print progress
+        if epoch % 10 == 0:
+            status = f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}"
+            if is_best:
+                status += f" (New Best)"
+            print(status)
+        elif is_best:
+            print(f"Epoch {epoch}, New best validation loss: {avg_val_loss:.6f}")
 
         if patience_counter >= early_stopping_patience:
             print(f"Early stopping at epoch {epoch}, Best Val Loss: {best_val_loss:.6f}")
@@ -351,7 +356,7 @@ def train_string_renderer():
 
     # Create the dataset and save samples to the train_input folder
     dataset = generate_font.create_string_dataset(
-        num_samples=15000,  # 15000 samples for better learning
+        num_samples=25000,  # Increased to 25000 samples for even better learning
         min_length=10,
         samples_dir="train_input",
         num_samples_to_save=10  # Save 10 samples for reference
@@ -377,7 +382,7 @@ def train_string_renderer():
     model = train_attention_model(
         model,
         dataset,
-        num_epochs=120,
+        num_epochs=200,
         batch_size=batch_size,
         early_stopping_patience=15,  # More patience to see learning curve
         validation_split=0.1  # 10% validation data
@@ -410,7 +415,7 @@ if __name__ == '__main__':
 
     # Test strings for model evaluation
     test_strings = [
-        "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
+        "HELLO FROM NEURAL FONT RENDERING",
         "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "WWWWWWWWWWWWWWWWWWWW",  # Width test (repeating wide character)
