@@ -296,7 +296,7 @@ def train_attention_model(model, dataset, num_epochs=500, lr=0.0005, batch_size=
             best_model_state = model.state_dict().copy()
         else:
             patience_counter += 1
-            
+
         # Print progress
         if epoch % 10 == 0:
             status = f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}"
@@ -415,7 +415,7 @@ if __name__ == '__main__':
 
     # Test strings for model evaluation
     test_strings = [
-        "HELLO FROM NEURAL FONT RENDERING",
+        "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
         "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "WWWWWWWWWWWWWWWWWWWW",  # Width test (repeating wide character)
