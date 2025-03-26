@@ -68,7 +68,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_pixelshuffle"
+OUTPUT_DIR = "train_test_pixelshuffle_more_workers"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -79,8 +79,8 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Configure CUDA device - restrict to GPU 3 only
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# Configure CUDA device - restrict to GPU 4 only
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 # Device selection logic
 if torch.cuda.is_available():
@@ -223,7 +223,7 @@ def train_attention_model(model, dataset, batch_size):
         batch_size=batch_size,
         shuffle=True,
         generator=g,
-        num_workers=4,
+        num_workers=32,
         pin_memory=True,
         worker_init_fn=lambda id: random.seed(SEED + id)
     )
@@ -233,7 +233,7 @@ def train_attention_model(model, dataset, batch_size):
         batch_size=batch_size,
         shuffle=False,
         generator=g,
-        num_workers=2,
+        num_workers=32,
         pin_memory=True
     )
 
@@ -381,7 +381,8 @@ def train_string_renderer():
         num_samples=50000,
         min_length=10,
         samples_dir="train_input",
-        num_samples_to_save=10  # Save 10 samples for reference
+        num_samples_to_save=10,  # Save 10 samples for reference
+        num_workers=32  # Match physical core count for optimal performance
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")

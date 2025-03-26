@@ -116,38 +116,97 @@ def place_string_on_sheet(string, target_sheet):
 
     return target_sheet
 
-# Create a dataset of text sheets and save sample images to a folder
-def create_string_dataset(num_samples=1000, min_length=20, samples_dir="train_input", num_samples_to_save=10):
-    """Create a dataset of text sheets with consistent character grid dimensions."""
-    # Reset random seed for reproducible dataset generation
-    random.seed(SEED)
+# Helper function to generate a chunk of samples
+def _generate_dataset_chunk(chunk_id, start_idx, end_idx, min_length, samples_dir, num_samples_to_save):
+    """Generate a chunk of dataset samples with a deterministic seed derived from chunk_id"""
+    # Set seed based on global seed and chunk ID for determinism
+    chunk_seed = SEED + chunk_id
+    random.seed(chunk_seed)
+    np.random.seed(chunk_seed)
 
-    # Pre-allocate arrays for better performance
-    all_inputs = []
-    all_strings = []  # Store generated strings for reference
-    all_targets = np.zeros((num_samples, SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
+    chunk_size = end_idx - start_idx
+
+    # Pre-allocate arrays for this chunk
+    chunk_inputs = []
+    chunk_strings = []
+    chunk_targets = np.zeros((chunk_size, SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
+
+    # Generate samples for this chunk
+    for i in range(chunk_size):
+        sample_idx = start_idx + i
+
+        # Generate a random string that fits in the sheet
+        length = random.randint(min_length, MAX_CHARS_PER_SHEET)
+        string = generate_random_string(length)
+        chunk_strings.append(string)
+
+        # Convert to ASCII codes
+        ascii_codes = [ord(c) for c in string]
+        chunk_inputs.append(ascii_codes)
+
+        # Place string on sheet using shared function
+        place_string_on_sheet(string, chunk_targets[i])
+
+        # Save this sample as an image if requested
+        if sample_idx < num_samples_to_save:
+            # Ensure directory exists
+            os.makedirs(samples_dir, exist_ok=True)
+            # Convert binary sheet to image and save it
+            filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
+            binary_array_to_image(chunk_targets[i], output_path=filename)
+
+    return chunk_inputs, chunk_targets
+
+# Create a dataset of text sheets and save sample images to a folder
+def create_string_dataset(num_samples=1000, min_length=20, samples_dir="train_input",
+                         num_samples_to_save=10, num_workers=None):
+    """Create a dataset of text sheets with consistent character grid dimensions using parallel processing."""
+    import multiprocessing
+
+    # Determine number of workers (default to CPU count)
+    if num_workers is None:
+        num_workers = multiprocessing.cpu_count()
+
+    # Ensure we don't use more workers than samples
+    num_workers = min(num_workers, num_samples)
+
+    print(f"Generating {num_samples} samples using {num_workers} parallel workers...")
+
+    # Calculate chunk sizes
+    chunk_size = num_samples // num_workers
+    remainder = num_samples % num_workers
+
+    # Create chunks with balanced sizes
+    chunks = []
+    start_idx = 0
+    for i in range(num_workers):
+        # Add one extra to the first 'remainder' chunks
+        size = chunk_size + (1 if i < remainder else 0)
+        end_idx = start_idx + size
+        chunks.append((i, start_idx, end_idx))
+        start_idx = end_idx
 
     os.makedirs(samples_dir, exist_ok=True)
     print(f"Saving {min(num_samples, num_samples_to_save)} sample sheets to {samples_dir}/")
 
-    for sample_idx in range(num_samples):
-        # Generate a random string that fits in the sheet
-        length = random.randint(min_length, MAX_CHARS_PER_SHEET)
-        string = generate_random_string(length)
-        all_strings.append(string)
+    # Generate chunks in parallel
+    with multiprocessing.Pool(processes=num_workers) as pool:
+        results = pool.starmap(
+            _generate_dataset_chunk,
+            [(chunk_id, start, end, min_length, samples_dir, num_samples_to_save)
+             for chunk_id, start, end in chunks]
+        )
 
-        # Convert to ASCII codes
-        ascii_codes = [ord(c) for c in string]
-        all_inputs.append(ascii_codes)
+    # Combine results from all chunks
+    all_inputs = []
+    all_targets = []
 
-        # Place string on sheet using shared function
-        place_string_on_sheet(string, all_targets[sample_idx])
+    for chunk_inputs, chunk_targets in results:
+        all_inputs.extend(chunk_inputs)
+        all_targets.append(chunk_targets)
 
-        # Save this sample as an image if requested
-        if sample_idx < num_samples_to_save:
-            # Convert binary sheet to image and save it
-            filename = f"{samples_dir}/input_{sample_idx}_{string[:20]}.bmp"
-            binary_array_to_image(all_targets[sample_idx], output_path=filename)
+    # Combine all target arrays
+    all_targets = np.concatenate(all_targets, axis=0)
 
     # Pad sequences to max_length
     max_len = max(len(s) for s in all_inputs)
@@ -239,7 +298,8 @@ if __name__ == "__main__":
         num_samples=5000,  # Generate 5000 samples
         min_length=10,
         samples_dir="train_input",
-        num_samples_to_save=20  # Save 20 samples for reference
+        num_samples_to_save=20,  # Save 20 samples for reference
+        num_workers=32
     )
 
     # Generate and save challenging test patterns
