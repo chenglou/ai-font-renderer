@@ -15,9 +15,9 @@ Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k, and further improved with 25k samples.
-  - Direct FC output is used for bitmap rendering
+  - Indirect rendering via downsampled feature map and upsampling for better scalability
   - For grayscale output, standard MSE loss works better than focal or custom losses
-  - Sigmoid activation with scaling factor of 1.2 provides good balance of contrast and antialiasing
+  - Clamped linear output (replacing sigmoid) provides sharper gradients for training
   - Early stopping based on validation helps prevent overfitting (confirmed)
   - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage (~60% reduction)
   - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output)
@@ -26,11 +26,13 @@ Architecture learnings:
   - Dropout regularization is needed for improved generalization
   - (FP16) was tested and produced same quality outputs as FP32, but added implementation complexity
 
-Architecture simplification:
-  - Direct fully-connected output to bitmap provides simplest implementation
-  - No convolutional layers or complex upsampling needed
-  - Focus on attention mechanism for character relationships
+Architecture improvements:
+  - Replaced large FC layer with smaller FC + convolution + pixel shuffle upsampling
+  - FC layer outputs downsampled feature map (reducing parameters by ~75%)
+  - Single convolution expands features for pixel shuffle upsampling
+  - Clamped linear output (instead of sigmoid) provides sharper gradients
   - Grayscale rendering preserves antialiasing in the font output
+  - Architecture scales better to larger image dimensions
 
 Challenging patterns requiring special attention:
   - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
@@ -39,10 +41,12 @@ Challenging patterns requiring special attention:
 
 Performance optimizations:
   - Hardware acceleration with MPS (Metal Performance Shaders) gives ~60% speedup on M-series Macs
-  - Larger batch sizes (256 for CPU/MPS, 1024 for GPU) significantly improve training efficiency
-  - Scaled learning rate (0.0005 with larger batches) maintains stability while improving convergence
-  - Training time ~4-5 minutes on M2 Pro with these optimizations (vs 26+ minutes without)
-  - Reduced model complexity (removing FC layers) further improves training efficiency
+  - Optimal batch sizes (256 for CPU/MPS, 1024 for GPU) improve training efficiency
+  - Increased learning rate (from 0.0005 to 0.004) speeds up training with the new architecture
+  - Doubled dataset size (50k samples) for better generalization
+  - Reduced parameter count (~75% reduction in FC layer) enables faster training
+  - Memory-efficient architecture allows training on higher resolution outputs
+  - Training time significantly reduced with these optimizations
 
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
@@ -64,7 +68,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_pixelshuffle_enhanced"
+OUTPUT_DIR = "train_test_pixelshuffle"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -113,12 +117,18 @@ class AttentionFontRenderer(nn.Module):
         self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
         self.dropout1 = nn.Dropout(0.15)
 
-        # Generate bitmap directly
-        self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
+        # FC layer outputs downsampled feature map (1 channel at half resolution)
+        self.fc_output = nn.Linear(64 * max_length, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2))
+
+        # Conv layer expands features for pixel shuffle (1→4 channels)
+        self.conv = nn.Conv2d(1, 4, kernel_size=3, padding=1)
+
+        # Pixel shuffle for upsampling
+        self.pixel_shuffle = nn.PixelShuffle(2)  # scale factor 2
 
         self.activation = nn.ReLU()
-        # Use sigmoid with scaling factor of 1.2 for increased contrast
-        self.output_activation = lambda x: torch.sigmoid(x * 1.2)
+        # Use clamped linear output instead of sigmoid
+        self.output_activation = lambda x: torch.clamp(x, 0.0, 1.0)
 
     def forward(self, x):
         # x shape: [batch_size, seq_len], containing ASCII codes
@@ -157,19 +167,31 @@ class AttentionFontRenderer(nn.Module):
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
-        # Generate the bitmap directly
-        sheet = self.output_activation(self.fc_output(x))  # [batch_size, SHEET_HEIGHT * SHEET_WIDTH]
+        # Generate downsampled feature map
+        x = self.fc_output(x)  # [batch_size, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2)]
 
-        # Reshape to proper dimensions
-        sheet = sheet.view(batch_size, SHEET_HEIGHT, SHEET_WIDTH)
+        # Reshape to [batch_size, 1, SHEET_HEIGHT//2, SHEET_WIDTH//2]
+        x = x.view(batch_size, 1, SHEET_HEIGHT//2, SHEET_WIDTH//2)
+
+        # Apply conv to expand features (1→4 channels)
+        x = self.activation(self.conv(x))  # [batch_size, 4, SHEET_HEIGHT//2, SHEET_WIDTH//2]
+
+        # Apply pixel shuffle upsampling
+        sheet = self.pixel_shuffle(x)  # [batch_size, 1, SHEET_HEIGHT, SHEET_WIDTH]
+
+        # Apply output activation and remove channel dimension
+        sheet = self.output_activation(sheet).squeeze(1)  # [batch_size, SHEET_HEIGHT, SHEET_WIDTH]
 
         return sheet
 
 # Use the generate_font module to create datasets
 
 # Balanced training function with focal loss and moderate regularization
-def train_attention_model(model, dataset, num_epochs=500, lr=0.0005, batch_size=32,
-                         early_stopping_patience=15, validation_split=0.1):
+def train_attention_model(model, dataset, batch_size):
+    num_epochs=200
+    lr=0.004
+    early_stopping_patience=15
+    validation_split=0.1
     # Create additional validation samples with specific patterns
     # Get challenging pattern dataset from generate_font
     pattern_dataset = generate_font.generate_challenging_patterns()
@@ -356,7 +378,7 @@ def train_string_renderer():
 
     # Create the dataset and save samples to the train_input folder
     dataset = generate_font.create_string_dataset(
-        num_samples=25000,  # Increased to 25000 samples for even better learning
+        num_samples=50000,
         min_length=10,
         samples_dir="train_input",
         num_samples_to_save=10  # Save 10 samples for reference
@@ -371,21 +393,16 @@ def train_string_renderer():
 
     # Adjust batch size based on hardware
     if torch.cuda.is_available():
-        # Larger batch size for GPU
-        batch_size = 1024  # Double the previous GPU batch size
+        batch_size = 1024
     else:
-        # Original batch size for CPU/MPS
-        batch_size = 256  # Double the previous CPU/MPS batch size
+        batch_size = 256
 
     print(f"Using batch size {batch_size}")
 
     model = train_attention_model(
         model,
         dataset,
-        num_epochs=200,
-        batch_size=batch_size,
-        early_stopping_patience=15,  # More patience to see learning curve
-        validation_split=0.1  # 10% validation data
+        batch_size,
     )
 
     return model
