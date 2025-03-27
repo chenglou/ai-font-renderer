@@ -224,51 +224,6 @@ def create_string_dataset(num_samples=1000, min_length=20, samples_dir="train_in
 
     return data.TensorDataset(inputs_tensor, targets_tensor)
 
-def generate_challenging_patterns():
-    """Generate a dataset with challenging patterns for validation testing"""
-
-    patterns = [
-        "IIIIIIIIIIIIIIIIIIII",  # Repeating I's
-        "WWWWWWWWWWWWWWWWWWWW",  # Repeating W's
-        "IIIII IIIII IIIII IIIII",  # Groups of I's with spaces
-        "WWWWW WWWWW WWWWW WWWWW",  # Groups of W's with spaces
-        "IWIWIWIWIWIWIWIWIWIWI",  # Alternating I and W pattern
-        "                     ",  # Just spaces
-    ]
-
-    # Prepare tensors for patterns
-    pattern_inputs = []
-    pattern_targets = []
-
-    # Create dataset from patterns
-    for idx, pattern in enumerate(patterns):
-        # Convert to ASCII codes
-        ascii_codes = [ord(c) for c in pattern]
-        # Pad to max_length
-        if len(ascii_codes) < MAX_CHARS_PER_SHEET:
-            ascii_codes = ascii_codes + [0] * (MAX_CHARS_PER_SHEET - len(ascii_codes))
-
-        # Create input tensor
-        pattern_input = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0)
-        pattern_inputs.append(pattern_input)
-
-        # Create target bitmap
-        target = np.zeros((SHEET_HEIGHT, SHEET_WIDTH), dtype=np.float32)
-
-        # Place pattern on sheet using shared function
-        place_string_on_sheet(pattern, target)
-
-        pattern_targets.append(torch.tensor(target, dtype=torch.float32).unsqueeze(0))
-
-        # Save these pattern samples for visualization
-        os.makedirs("train_input", exist_ok=True)
-        filename = f"train_input/test_{idx}_{pattern.replace(' ', '_')}.bmp"
-        binary_array_to_image(target, output_path=filename)
-
-    # Concatenate and return dataset
-    pattern_inputs = torch.cat(pattern_inputs, dim=0)
-    pattern_targets = torch.cat(pattern_targets, dim=0)
-    return data.TensorDataset(pattern_inputs, pattern_targets)
 
 def create_dataset_metadata(samples_dir="train_input"):
     """Create a metadata file with information about the dataset"""
@@ -302,7 +257,5 @@ if __name__ == "__main__":
         num_workers=32
     )
 
-    # Generate and save challenging test patterns
-    generate_challenging_patterns()
 
     print("Dataset generation complete. Check the train_input/ directory.")

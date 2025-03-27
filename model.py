@@ -36,8 +36,6 @@ Architecture improvements:
 
 Challenging patterns requiring special attention:
   - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
-  - Alternating character patterns (e.g., "IWIWIWIWIWI")
-  - Groups of similar characters with spaces (e.g., "IIIII IIIII IIIII")
 
 Performance optimizations:
   - Hardware acceleration with MPS (Metal Performance Shaders) gives ~60% speedup on M-series Macs
@@ -68,7 +66,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_pixelshuffle_more_workers"
+OUTPUT_DIR = "train_test_wordwrap_fira"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -79,8 +77,8 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Configure CUDA device - restrict to GPU 4 only
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+# Configure CUDA device - restrict to GPU 3 only
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # Device selection logic
 if torch.cuda.is_available():
@@ -94,6 +92,25 @@ else:
     print("Using CPU device")
 
 print(f"Device: {device}")
+
+# Test strings for model evaluation
+test_strings = [
+    "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
+    "TWO WORLDS ONE FAMILY TRUST YOUR HEART LET FATE DECIDE TO GUIDE THESE LIVES WE SEE",
+    "A PARADISE UNTOUCHED BY MAN WITHIN THIS WORLD BLESSED WITH LOVE A SIMPLE LIFE THEY LIVE IN PEACE",
+    "SOFTLY TREAD THE SAND BELOW YOUR FEET NOW TWO WORLDS, ONE FAMILY TRUST YOUR HEART, LET FATE DECIDE TO GUIDE THESE LIVES WE SEE",
+    "BENEATH THE SHELTER OF THE TREES ONLY LOVE CAN ENTER HERE A SIMPLE LIFE, THEY LIVE IN PEACE",
+    "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "WWWWWWWWWWWWWWWWWWWW",  # Width test (repeating wide character)
+    "IIIIIIIIIIIIIIIIIIII",  # Width test (repeating narrow character)
+    "ALTERNATING CASE TEST   SPACES",  # Spacing test
+    "CLAUDE IS RENDERING FONTS",
+    "ZYXWVUTSRQPONMLKJIHGFEDCBA",  # Reverse alphabet
+    "AEIOU BCDFGHJKLMNPQRSTVWXYZ",  # Vowels and consonants grouped
+    "EXACTLY TWENTY CHARS",  # Boundary test
+    "                    ",
+]
 
 class AttentionFontRenderer(nn.Module):
     def __init__(self, max_length=MAX_CHARS_PER_SHEET):
@@ -192,26 +209,18 @@ def train_attention_model(model, dataset, batch_size):
     lr=0.004
     early_stopping_patience=15
     validation_split=0.1
-    # Create additional validation samples with specific patterns
-    # Get challenging pattern dataset from generate_font
-    pattern_dataset = generate_font.generate_challenging_patterns()
-    additional_val_samples = len(pattern_dataset)  # Get the number of additional samples
-
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
-    val_size = int(validation_split * orig_dataset_size) - additional_val_samples  # Adjust to account for pattern samples
+    val_size = int(validation_split * orig_dataset_size)
     train_size = orig_dataset_size - val_size
 
-    print(f"Dataset split: {train_size} training samples, {val_size + additional_val_samples} validation samples")
+    print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
 
     # Split the original dataset
-    train_dataset, val_dataset_orig = data.random_split(
+    train_dataset, val_dataset = data.random_split(
         dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(SEED)
     )
-
-    # Combine the original validation set with our pattern samples
-    val_dataset = data.ConcatDataset([val_dataset_orig, pattern_dataset])
 
     # Create dataloaders with fixed random seed
     g = torch.Generator()
@@ -325,6 +334,11 @@ def train_attention_model(model, dataset, batch_size):
             if is_best:
                 status += f" (New Best)"
             print(status)
+
+            # Create a directory for this epoch's outputs
+            epoch_dir = f"{OUTPUT_DIR}/epoch_{epoch}"
+            # Render test strings to the epoch directory
+            render_strings(model, test_strings, output_dir=epoch_dir)
         elif is_best:
             print(f"Epoch {epoch}, New best validation loss: {avg_val_loss:.6f}")
 
@@ -429,20 +443,6 @@ if __name__ == '__main__':
     # Ensure output directory exists at start
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Test strings for model evaluation
-    test_strings = [
-        "HELLO LEANN I LOVE YOU SO MUCH I HOPE YOU HAVE A GREAT DAY",
-        "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "WWWWWWWWWWWWWWWWWWWW",  # Width test (repeating wide character)
-        "IIIIIIIIIIIIIIIIIIII",  # Width test (repeating narrow character)
-        "ALTERNATING CASE TEST   SPACES",  # Spacing test
-        "CLAUDE IS RENDERING FONTS",
-        "ZYXWVUTSRQPONMLKJIHGFEDCBA",  # Reverse alphabet
-        "AEIOU BCDFGHJKLMNPQRSTVWXYZ",  # Vowels and consonants grouped
-        "EXACTLY TWENTY CHARS",  # Boundary test
-        "                    ",
-    ]
     # Check command-line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "--train":
