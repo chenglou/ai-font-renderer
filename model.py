@@ -376,13 +376,11 @@ def render_strings(model, strings, output_dir):
 def train_string_renderer():
     print("Creating sheet dataset...")
 
-    # Create the dataset and save samples to the train_input folder
-    dataset = generate_font.create_string_dataset(
-        num_samples=50000,
-        min_length=10,
-        samples_dir="train_input",
-        num_samples_to_save=10,  # Save 10 samples for reference
-        num_workers=32  # Match physical core count for optimal performance
+    # Load the dataset from train_input folder
+    import load_data
+    dataset = load_data.load_string_dataset(
+        data_dir="train_input",
+        num_samples=50000
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
