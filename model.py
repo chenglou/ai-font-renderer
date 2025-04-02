@@ -66,7 +66,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira"
+OUTPUT_DIR = "train_test_wordwrap_fira_embed80_epoch1k_data150k"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -77,8 +77,8 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Configure CUDA device - restrict to GPU 3 only
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# Configure CUDA device - restrict to GPU 4 only
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 # Device selection logic
 if torch.cuda.is_available():
@@ -118,7 +118,7 @@ class AttentionFontRenderer(nn.Module):
         self.max_length = max_length
 
         # Reduced embedding dimension (80 → 32)
-        self.embedding_dim = 32  # Reduced from 80
+        self.embedding_dim = 80  # Reduced from 80
         self.embedding = nn.Embedding(128, self.embedding_dim)
         self.embedding_dropout = nn.Dropout(0.1)
 
@@ -127,15 +127,15 @@ class AttentionFontRenderer(nn.Module):
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
         # Single attention layer with reduced dimension
-        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=4, dropout=0.1)
+        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=8, dropout=0.15)
         self.layer_norm = nn.LayerNorm(self.embedding_dim)
 
         # Processing network (simplified) - adjusted dimensions
-        self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
-        self.dropout1 = nn.Dropout(0.15)
+        self.fc1 = nn.Linear(self.embedding_dim, 160)  # Increased for larger embedding
+        self.dropout1 = nn.Dropout(0.2)
 
         # FC layer outputs downsampled feature map (1 channel at half resolution)
-        self.fc_output = nn.Linear(64 * max_length, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2))
+        self.fc_output = nn.Linear(160 * max_length, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2))
 
         # Conv layer expands features for pixel shuffle (1→4 channels)
         self.conv = nn.Conv2d(1, 4, kernel_size=3, padding=1)
@@ -171,16 +171,16 @@ class AttentionFontRenderer(nn.Module):
         # Add residual connection and normalize
         attn_output = self.layer_norm(embedded + attn_output)
 
-        # Process through reduced fully connected layers
-        x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 64]
+        # Process through fully connected layers
+        x = self.activation(self.fc1(attn_output))  # [batch_size, seq_len, 160]
         x = self.dropout1(x)
 
         # Reshape to connect all character features
-        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 64]
+        x = x.reshape(batch_size, -1)  # [batch_size, seq_len * 160]
 
         # Zero-pad if sequence is shorter than max_length
         if seq_len < self.max_length:
-            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 64,
+            padding = torch.zeros(batch_size, (self.max_length - seq_len) * 160,
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
@@ -205,9 +205,9 @@ class AttentionFontRenderer(nn.Module):
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, batch_size):
-    num_epochs=200
-    lr=0.004
-    early_stopping_patience=15
+    num_epochs=1000
+    lr=0.003
+    early_stopping_patience=45
     validation_split=0.1
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
@@ -394,7 +394,7 @@ def train_string_renderer():
     import load_data
     dataset = load_data.load_string_dataset(
         data_dir="train_input",
-        num_samples=50000
+        num_samples=150000
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
