@@ -66,7 +66,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira"
+OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -77,8 +77,8 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Configure CUDA device - restrict to GPU 3 only
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# Configure CUDA device - restrict to GPU 4 only
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 # Device selection logic
 if torch.cuda.is_available():
@@ -120,19 +120,19 @@ class AttentionFontRenderer(nn.Module):
         # Reduced embedding dimension (80 → 32)
         self.embedding_dim = 32  # Reduced from 80
         self.embedding = nn.Embedding(128, self.embedding_dim)
-        self.embedding_dropout = nn.Dropout(0.1)
+        self.embedding_dropout = nn.Dropout(0.2)  # Increased dropout
 
         # Learned positional encoding with reduced dimension
         self.positional_encoding = nn.Parameter(torch.zeros(max_length, self.embedding_dim))
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
-        # Single attention layer with reduced dimension
-        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=4, dropout=0.1)
+        # Single attention layer with reduced dimension and increased dropout
+        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=4, dropout=0.2)
         self.layer_norm = nn.LayerNorm(self.embedding_dim)
 
         # Processing network (simplified) - adjusted dimensions
         self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
-        self.dropout1 = nn.Dropout(0.15)
+        self.dropout1 = nn.Dropout(0.25)  # Increased dropout
 
         # FC layer outputs downsampled feature map (1 channel at half resolution)
         self.fc_output = nn.Linear(64 * max_length, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2))
@@ -206,9 +206,9 @@ class AttentionFontRenderer(nn.Module):
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, batch_size):
     num_epochs=200
-    lr=0.004
-    early_stopping_patience=15
-    validation_split=0.1
+    lr=0.001  # Further reduced learning rate to prevent overfitting
+    early_stopping_patience=70  # Increased from 15 to 70 to allow more training epochs
+    validation_split=0.2  # Increased validation split to get better generalization
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
     val_size = int(validation_split * orig_dataset_size)
@@ -252,12 +252,12 @@ def train_attention_model(model, dataset, batch_size):
         # Keeping function name for compatibility
         return nn.functional.mse_loss(pred, target)
 
-    # AdamW optimizer with moderate weight decay
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    # AdamW optimizer with minimal weight decay to prevent overfitting
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0005, betas=(0.9, 0.99))
 
-    # Simple learning rate scheduler
+    # Learning rate scheduler with higher patience and smoother reduction
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
+        optimizer, mode='min', factor=0.7, patience=20, min_lr=1e-6
     )
 
     # Early stopping setup
@@ -329,8 +329,8 @@ def train_attention_model(model, dataset, batch_size):
             patience_counter += 1
 
         # Print progress
-        if epoch % 10 == 0:
-            status = f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}"
+        if epoch % 5 == 0:  # Print more frequently to track progress better
+            status = f"Epoch {epoch}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
             if is_best:
                 status += f" (New Best)"
             print(status)

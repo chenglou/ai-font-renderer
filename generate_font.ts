@@ -179,7 +179,7 @@ function generateSeededRandomText(seed: number, minLength: number, maxLength: nu
   let remainingChars = length
   while (remainingChars > 0) {
     // Generate a random word with length between 1 and 15 characters
-    const randomWordLength = Math.min(Math.floor(random() * 15) + 1, remainingChars)
+    const randomWordLength = Math.min(Math.floor(random() * 10) + 1, remainingChars)
     let word = ""
     for (let i = 0; i < randomWordLength; i++) {
       const randomChar = String.fromCharCode(65 + Math.floor(random() * 26)) // A-Z
@@ -202,7 +202,7 @@ function generateSeededRandomText(seed: number, minLength: number, maxLength: nu
 console.log("Generating seeded random texts...")
 for (let i = 0; i < numSamples; i++) {
   const seed = i + 42 // Base seed + index, ensuring reproducibility
-  const text = generateSeededRandomText(seed, 130, 150)
+  const text = generateSeededRandomText(seed, 20, 130)
   textData.push(text)
 
   // Queue up the rendering operation (will be done asynchronously)
