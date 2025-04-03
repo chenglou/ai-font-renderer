@@ -156,7 +156,7 @@ fs.mkdirSync(SAMPLES_DIR, { recursive: true })
 // Generate samples
 console.log(`Generating text samples with Fira Code font in ${SAMPLES_DIR}/...`)
 
-const numSamples = 50000
+const numSamples = 150000
 const textData = []
 const renderQueue = []
 

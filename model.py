@@ -66,7 +66,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax"
+OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -205,7 +205,7 @@ class AttentionFontRenderer(nn.Module):
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, batch_size):
-    num_epochs=200
+    num_epochs=1000
     lr=0.001  # Further reduced learning rate to prevent overfitting
     early_stopping_patience=70  # Increased from 15 to 70 to allow more training epochs
     validation_split=0.2  # Increased validation split to get better generalization
@@ -394,7 +394,7 @@ def train_string_renderer():
     import load_data
     dataset = load_data.load_string_dataset(
         data_dir="train_input",
-        num_samples=50000
+        num_samples=150000
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
