@@ -202,7 +202,7 @@ function generateSeededRandomText(seed: number, minLength: number, maxLength: nu
 console.log("Generating seeded random texts...")
 for (let i = 0; i < numSamples; i++) {
   const seed = i + 42 // Base seed + index, ensuring reproducibility
-  const text = generateSeededRandomText(seed, 20, 130)
+  const text = generateSeededRandomText(seed, 10, 150)
   textData.push(text)
 
   // Queue up the rendering operation (will be done asynchronously)

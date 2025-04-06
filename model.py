@@ -66,7 +66,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k"
+OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k_word10150"
 
 # Set random seeds for reproducibility
 SEED = 42
