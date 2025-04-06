@@ -20,7 +20,8 @@ Architecture learnings:
   - Clamped linear output (replacing sigmoid) provides sharper gradients for training
   - Early stopping based on validation helps prevent overfitting (confirmed)
   - Smaller embedding dimensions (32) work just as well as larger ones (80) while reducing memory usage (~60% reduction)
-  - Learned positional encodings are CRUCIAL for this task - fixed sinusoidal encodings failed completely (99% white output)
+  - LEARNED positional encodings are CRUCIAL for this task - fixed sinusoidal encodings and RoPE (Rotary Position Embeddings) both failed completely (99% white output)
+  - This is likely because font rendering requires understanding 2D layout which only learned positional encodings can capture for this task
   - Both validation and regularization are important for generalization
   - Simpler architectures should be preferred when they perform comparably
   - Dropout regularization is needed for improved generalization
