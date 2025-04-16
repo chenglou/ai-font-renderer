@@ -66,8 +66,22 @@ from generate_font import SHEET_HEIGHT, SHEET_WIDTH
 from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
-# Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k_word10100"
+# Output directory for rendered test strings with timestamp
+import datetime
+OUTPUT_DIR = "train_output_" + datetime.datetime.now().strftime("%m_%d_%H_%M_%S")
+
+# Training hyperparameters
+NUM_EPOCHS = 1000
+LEARNING_RATE = 0.001
+EARLY_STOPPING_PATIENCE = 70
+VALIDATION_SPLIT = 0.2
+WEIGHT_DECAY = 0.0005
+EMBEDDING_DIM = 32
+DROPOUT_RATE = 0.2
+NUM_ATTENTION_HEADS = 4
+SCHEDULER_PATIENCE = 20
+SCHEDULER_FACTOR = 0.7
+MIN_LEARNING_RATE = 1e-6
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -118,22 +132,22 @@ class AttentionFontRenderer(nn.Module):
         super().__init__()
         self.max_length = max_length
 
-        # Reduced embedding dimension (80 → 32)
-        self.embedding_dim = 32  # Reduced from 80
+        # Use global embedding dimension
+        self.embedding_dim = EMBEDDING_DIM
         self.embedding = nn.Embedding(128, self.embedding_dim)
-        self.embedding_dropout = nn.Dropout(0.2)  # Increased dropout
+        self.embedding_dropout = nn.Dropout(DROPOUT_RATE)
 
         # Learned positional encoding with reduced dimension
         self.positional_encoding = nn.Parameter(torch.zeros(max_length, self.embedding_dim))
         nn.init.normal_(self.positional_encoding, mean=0, std=0.02)
 
         # Single attention layer with reduced dimension and increased dropout
-        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=4, dropout=0.2)
+        self.attention = nn.MultiheadAttention(embed_dim=self.embedding_dim, num_heads=NUM_ATTENTION_HEADS, dropout=DROPOUT_RATE)
         self.layer_norm = nn.LayerNorm(self.embedding_dim)
 
         # Processing network (simplified) - adjusted dimensions
         self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
-        self.dropout1 = nn.Dropout(0.25)  # Increased dropout
+        self.dropout1 = nn.Dropout(DROPOUT_RATE + 0.05)  # Slightly higher dropout for FC layers
 
         # FC layer outputs feature map directly at full resolution (removed upsampling)
         self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
@@ -194,13 +208,28 @@ class AttentionFontRenderer(nn.Module):
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, batch_size):
-    num_epochs=1000
-    lr=0.001  # Further reduced learning rate to prevent overfitting
-    early_stopping_patience=70  # Increased from 15 to 70 to allow more training epochs
-    validation_split=0.2  # Increased validation split to get better generalization
+    # Create config file with all parameters
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(f"{OUTPUT_DIR}/config.txt", "w") as config_file:
+        config_file.write(f"# Training configuration\n")
+        config_file.write(f"num_epochs = {NUM_EPOCHS}\n")
+        config_file.write(f"learning_rate = {LEARNING_RATE}\n")
+        config_file.write(f"batch_size = {batch_size}\n")
+        config_file.write(f"early_stopping_patience = {EARLY_STOPPING_PATIENCE}\n")
+        config_file.write(f"validation_split = {VALIDATION_SPLIT}\n")
+        config_file.write(f"weight_decay = {WEIGHT_DECAY}\n")
+        config_file.write(f"embedding_dim = {EMBEDDING_DIM}\n")
+        config_file.write(f"dropout_rate = {DROPOUT_RATE}\n")
+        config_file.write(f"num_attention_heads = {NUM_ATTENTION_HEADS}\n")
+        config_file.write(f"max_length = {model.max_length}\n")
+        config_file.write(f"data_size = {len(dataset)}\n")
+        config_file.write(f"random_seed = {SEED}\n")
+        config_file.write(f"sheet_height = {SHEET_HEIGHT}\n")
+        config_file.write(f"sheet_width = {SHEET_WIDTH}\n")
+
     # Split the original dataset into training and validation
     orig_dataset_size = len(dataset)
-    val_size = int(validation_split * orig_dataset_size)
+    val_size = int(VALIDATION_SPLIT * orig_dataset_size)
     train_size = orig_dataset_size - val_size
 
     print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
@@ -242,11 +271,11 @@ def train_attention_model(model, dataset, batch_size):
         return nn.functional.mse_loss(pred, target)
 
     # AdamW optimizer with minimal weight decay to prevent overfitting
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0005, betas=(0.9, 0.99))
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.99))
 
     # Learning rate scheduler with higher patience and smoother reduction
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.7, patience=20, min_lr=1e-6
+        optimizer, mode='min', factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE, min_lr=MIN_LEARNING_RATE
     )
 
     # Early stopping setup
@@ -255,7 +284,7 @@ def train_attention_model(model, dataset, batch_size):
     best_model_state = None
 
     # Training loop
-    for epoch in range(num_epochs):
+    for epoch in range(NUM_EPOCHS):
         # Training phase
         model.train()
         total_train_loss = 0
@@ -331,16 +360,27 @@ def train_attention_model(model, dataset, batch_size):
         elif is_best:
             print(f"Epoch {epoch}, New best validation loss: {avg_val_loss:.6f}")
 
-        if patience_counter >= early_stopping_patience:
+        if patience_counter >= EARLY_STOPPING_PATIENCE:
             print(f"Early stopping at epoch {epoch}, Best Val Loss: {best_val_loss:.6f}")
             # Restore best model
             model.load_state_dict(best_model_state)
             break
 
     # Ensure best model is loaded
-    if best_model_state is not None and patience_counter < early_stopping_patience:
+    if best_model_state is not None and patience_counter < EARLY_STOPPING_PATIENCE:
         model.load_state_dict(best_model_state)
         print(f"Training completed, Best Val Loss: {best_val_loss:.6f}")
+
+    # Write training results to file
+    final_epoch = epoch + 1 if patience_counter < EARLY_STOPPING_PATIENCE else epoch - patience_counter
+    with open(f"{OUTPUT_DIR}/training_results.txt", "w") as results_file:
+        results_file.write(f"# Training Results\n")
+        results_file.write(f"final_epoch = {final_epoch}\n")
+        results_file.write(f"best_validation_loss = {best_val_loss:.6f}\n")
+        results_file.write(f"final_learning_rate = {optimizer.param_groups[0]['lr']:.6f}\n")
+        results_file.write(f"early_stopped = {patience_counter >= EARLY_STOPPING_PATIENCE}\n")
+        results_file.write(f"training_duration_epochs = {final_epoch}\n")
+        results_file.write(f"training_completed = {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     return model
 
