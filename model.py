@@ -61,11 +61,13 @@ import torch.utils.data as data
 import random
 import os
 import numpy as np
-import generate_font  # Import the font generation module
-from generate_font import SHEET_HEIGHT, SHEET_WIDTH
-from generate_font import MAX_CHARS_PER_SHEET
+from helpers import render_strings, save_model, load_model, load_string_dataset, MODEL_FILENAME
 
-# No upsampling - using original dimensions
+SHEET_HEIGHT = 80
+SHEET_WIDTH = 240
+MAX_CHARS_PER_SHEET = 100
+NUM_SAMPLES = 150000
+
 # Output directory for rendered test strings with timestamp
 import datetime
 OUTPUT_DIR = "train_output_" + datetime.datetime.now().strftime("%m_%d_%H_%M_%S")
@@ -92,8 +94,7 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Configure CUDA device - restrict to GPU 4 only
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # Device selection logic
 if torch.cuda.is_available():
@@ -222,6 +223,8 @@ def train_attention_model(model, dataset, batch_size):
         config_file.write(f"dropout_rate = {DROPOUT_RATE}\n")
         config_file.write(f"num_attention_heads = {NUM_ATTENTION_HEADS}\n")
         config_file.write(f"max_length = {model.max_length}\n")
+        config_file.write(f"max_chars_per_sheet = {MAX_CHARS_PER_SHEET}\n")
+        config_file.write(f"num_samples = {NUM_SAMPLES}\n")
         config_file.write(f"data_size = {len(dataset)}\n")
         config_file.write(f"random_seed = {SEED}\n")
         config_file.write(f"sheet_height = {SHEET_HEIGHT}\n")
@@ -265,9 +268,7 @@ def train_attention_model(model, dataset, batch_size):
     )
 
     # Plain MSE loss for grayscale values
-    def focal_mse_loss(pred, target, contrast_factor=None):
-        # Using pure MSE loss for grayscale
-        # Keeping function name for compatibility
+    def compute_loss(pred, target):
         return nn.functional.mse_loss(pred, target)
 
     # AdamW optimizer with minimal weight decay to prevent overfitting
@@ -304,7 +305,7 @@ def train_attention_model(model, dataset, batch_size):
             # Ensure targets and outputs have matching shapes
             batch_targets = batch_targets.view(outputs.shape)
 
-            loss = focal_mse_loss(outputs, batch_targets)
+            loss = compute_loss(outputs, batch_targets)
 
             # Backward pass and optimization
             loss.backward()
@@ -327,7 +328,7 @@ def train_attention_model(model, dataset, batch_size):
                 # Ensure targets and outputs have matching shapes
                 batch_targets = batch_targets.view(outputs.shape)
 
-                val_loss = focal_mse_loss(outputs, batch_targets)
+                val_loss = compute_loss(outputs, batch_targets)
                 total_val_loss += val_loss.item()
 
         # Calculate average losses
@@ -356,7 +357,7 @@ def train_attention_model(model, dataset, batch_size):
             # Create a directory for this epoch's outputs
             epoch_dir = f"{OUTPUT_DIR}/epoch_{epoch}"
             # Render test strings to the epoch directory
-            render_strings(model, test_strings, output_dir=epoch_dir)
+            render_strings(model, test_strings, output_dir=epoch_dir, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, device=device)
         elif is_best:
             print(f"Epoch {epoch}, New best validation loss: {avg_val_loss:.6f}")
 
@@ -384,46 +385,18 @@ def train_attention_model(model, dataset, batch_size):
 
     return model
 
-# Function to save rendered sheets as BMP images
-def render_strings(model, strings, output_dir):
-    """Render a list of strings as BMP images"""
-    os.makedirs(output_dir, exist_ok=True)
-
-    for idx, string in enumerate(strings):
-        # Cap string length to model's max_length
-        if len(string) > model.max_length:
-            string = string[:model.max_length]
-            print(f"Warning: String truncated to {model.max_length} characters: {string}")
-
-        # Convert to ASCII codes and pad
-        ascii_codes = [ord(c) for c in string]
-        if len(ascii_codes) < model.max_length:
-            ascii_codes = ascii_codes + [0] * (model.max_length - len(ascii_codes))
-
-        # Get model prediction
-        x = torch.tensor(ascii_codes, dtype=torch.long).unsqueeze(0).to(device)
-        with torch.no_grad():
-            sheet = model(x).squeeze(0)  # shape will be [SHEET_HEIGHT, SHEET_WIDTH]
-
-        # Convert to numpy if needed
-        if isinstance(sheet, torch.Tensor):
-            sheet = sheet.detach().cpu().numpy()
-
-        # Convert binary array to image and save
-        filename = f"{output_dir}/string_{idx}.bmp"
-        generate_font.binary_array_to_image(sheet, output_path=filename)
-
-    print(f"Saved {len(strings)} rendered strings to {output_dir}/")
+# Use the imported render_strings function from helpers.py
 
 # Train the sheet-based renderer
 def train_string_renderer():
     print("Creating sheet dataset...")
 
     # Load the dataset from train_input folder
-    import load_data
-    dataset = load_data.load_string_dataset(
+    dataset = load_string_dataset(
         data_dir="train_input",
-        num_samples=150000
+        num_samples=NUM_SAMPLES,
+        sheet_height=SHEET_HEIGHT,
+        sheet_width=SHEET_WIDTH
     )
 
     print("Training attention-based sheet renderer with reduced embedding dimensions (32) and learned positional encoding...")
@@ -449,22 +422,7 @@ def train_string_renderer():
 
     return model
 
-def save_model(model, filename="font_renderer.pth"):
-    """Save model weights to a file"""
-    torch.save(model.state_dict(), filename)
-    print(f"Model saved to {filename}")
-
-def load_model(filename="font_renderer.pth"):
-    """Load model weights from a file"""
-    # Initialize model with defaults from imports
-    model = AttentionFontRenderer(
-        max_length=MAX_CHARS_PER_SHEET
-    )
-    model.load_state_dict(torch.load(filename, map_location=device))
-    model = model.to(device)
-    model.eval()  # Set to evaluation mode
-    print(f"Model loaded from {filename}")
-    return model
+# Use the imported save_model and load_model functions from helpers.py
 
 if __name__ == '__main__':
     import sys
@@ -480,19 +438,19 @@ if __name__ == '__main__':
             save_model(model)
 
             # Render test strings
-            render_strings(model, test_strings, output_dir=OUTPUT_DIR)
+            render_strings(model, test_strings, output_dir=OUTPUT_DIR, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, device=device)
         else:
             print(f"Unknown option: {sys.argv[1]}")
             print("Available options: --train")
             sys.exit(1)
     else:
         # Render mode: load model if available, otherwise train first
-        if os.path.exists("font_renderer.pth"):
-            model = load_model()
+        if os.path.exists(MODEL_FILENAME):
+            model = load_model(AttentionFontRenderer, MAX_CHARS_PER_SHEET, device=device)
         else:
             print("No saved model found. Training a new model...")
             model = train_string_renderer()
             save_model(model)
 
         # Render strings - edit this list to change what gets rendered
-        render_strings(model, test_strings, output_dir=OUTPUT_DIR)
+        render_strings(model, test_strings, output_dir=OUTPUT_DIR, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH, device=device)
