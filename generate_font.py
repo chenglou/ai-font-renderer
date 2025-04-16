@@ -48,7 +48,7 @@ def binary_array_to_image(binary_array, output_path=None):
 
 # Fira Code font configuration
 FONT_PATH = "FiraCode-Retina.ttf"
-FONT_SIZE = 30
+FONT_SIZE = 15  # Reduced from 30
 font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
 
 # Calculate dimensions based on the font
@@ -57,10 +57,11 @@ LINE_HEIGHT = math.ceil(font.getbbox("Mjpqy")[3] * 0.9)
 CHAR_HEIGHT = LINE_HEIGHT
 
 # Sheet dimensions
-SHEET_WIDTH = 480  # Keep this fixed as specified
+SHEET_WIDTH = 240  # Reduced from 480
 CHARS_PER_ROW = SHEET_WIDTH // CHAR_WIDTH  # Integer division rounds down
 NUM_ROWS = 5
-SHEET_HEIGHT = math.ceil(LINE_HEIGHT * NUM_ROWS)  # Calculate height from line height
+# Force exact height to match generated BMPs (80 pixels)
+SHEET_HEIGHT = 80  # Fixed height to match generated images
 MAX_ROWS = SHEET_HEIGHT // CHAR_HEIGHT
 MAX_CHARS_PER_SHEET = CHARS_PER_ROW * MAX_ROWS
 

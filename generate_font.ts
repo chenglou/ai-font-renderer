@@ -63,12 +63,12 @@ function createBMPBuffer(data: Uint8ClampedArray, width: number, height: number)
 
 // Font configuration
 const FONT_PATH = "FiraCode-Retina.ttf"
-const FONT_SIZE = 24
+const FONT_SIZE = 12
 const FONT_FAMILY = "Fira Code"
 
-// Sheet dimensions
-const SHEET_WIDTH = 480
-const SHEET_HEIGHT = 160
+// Sheet dimensions - reduced size (half of original)
+const SHEET_WIDTH = 240
+const SHEET_HEIGHT = 80
 const PADDING = 0
 
 // Function to wrap text with word breaks
@@ -202,7 +202,7 @@ function generateSeededRandomText(seed: number, minLength: number, maxLength: nu
 console.log("Generating seeded random texts...")
 for (let i = 0; i < numSamples; i++) {
   const seed = i + 42 // Base seed + index, ensuring reproducibility
-  const text = generateSeededRandomText(seed, 10, 150)
+  const text = generateSeededRandomText(seed, 10, 100)
   textData.push(text)
 
   // Queue up the rendering operation (will be done asynchronously)

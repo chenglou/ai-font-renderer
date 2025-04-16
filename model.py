@@ -67,7 +67,7 @@ from generate_font import MAX_CHARS_PER_SHEET
 
 # No upsampling - using original dimensions
 # Output directory for rendered test strings
-OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k_word10150"
+OUTPUT_DIR = "train_test_wordwrap_fira_patience70_data10charsmax_epoch1k_data150k_word10100"
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -135,14 +135,8 @@ class AttentionFontRenderer(nn.Module):
         self.fc1 = nn.Linear(self.embedding_dim, 64)  # Reduced from 160
         self.dropout1 = nn.Dropout(0.25)  # Increased dropout
 
-        # FC layer outputs downsampled feature map (1 channel at half resolution)
-        self.fc_output = nn.Linear(64 * max_length, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2))
-
-        # Conv layer expands features for pixel shuffle (1→4 channels)
-        self.conv = nn.Conv2d(1, 4, kernel_size=3, padding=1)
-
-        # Pixel shuffle for upsampling
-        self.pixel_shuffle = nn.PixelShuffle(2)  # scale factor 2
+        # FC layer outputs feature map directly at full resolution (removed upsampling)
+        self.fc_output = nn.Linear(64 * max_length, SHEET_HEIGHT * SHEET_WIDTH)
 
         self.activation = nn.ReLU()
         # Use clamped linear output instead of sigmoid
@@ -185,20 +179,14 @@ class AttentionFontRenderer(nn.Module):
                                 device=x.device)
             x = torch.cat([x, padding], dim=1)
 
-        # Generate downsampled feature map
-        x = self.fc_output(x)  # [batch_size, (SHEET_HEIGHT//2) * (SHEET_WIDTH//2)]
+        # Generate full resolution feature map directly
+        x = self.fc_output(x)  # [batch_size, SHEET_HEIGHT * SHEET_WIDTH]
 
-        # Reshape to [batch_size, 1, SHEET_HEIGHT//2, SHEET_WIDTH//2]
-        x = x.view(batch_size, 1, SHEET_HEIGHT//2, SHEET_WIDTH//2)
+        # Reshape to [batch_size, SHEET_HEIGHT, SHEET_WIDTH]
+        sheet = x.view(batch_size, SHEET_HEIGHT, SHEET_WIDTH)
 
-        # Apply conv to expand features (1→4 channels)
-        x = self.activation(self.conv(x))  # [batch_size, 4, SHEET_HEIGHT//2, SHEET_WIDTH//2]
-
-        # Apply pixel shuffle upsampling
-        sheet = self.pixel_shuffle(x)  # [batch_size, 1, SHEET_HEIGHT, SHEET_WIDTH]
-
-        # Apply output activation and remove channel dimension
-        sheet = self.output_activation(sheet).squeeze(1)  # [batch_size, SHEET_HEIGHT, SHEET_WIDTH]
+        # Apply output activation
+        sheet = self.output_activation(sheet)  # [batch_size, SHEET_HEIGHT, SHEET_WIDTH]
 
         return sheet
 
