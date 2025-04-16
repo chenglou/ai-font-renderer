@@ -2,10 +2,14 @@
 This file implements an attention-based neural network for rendering ASCII text as bitmap font images.
 
 The model uses self-attention mechanisms that allow characters to influence each other's rendering,
-creating a coherent font appearance across a string. It includes a complete pipeline for:
-- Training a neural font renderer on ASCII characters
-- Rendering text strings as bitmap images
-- Saving and loading trained models
+creating a coherent font appearance across a string. The main model implementation and training logic
+are contained in this file, while helper functions have been extracted to helpers.py.
+
+Key components in this file:
+- AttentionFontRenderer neural network model
+- Training pipeline with validation and early stopping
+- Configuration parameters and hyperparameters
+- Command-line interface for training and rendering
 
 Usage:
   - Run with --train flag to train a new model: python model.py --train
@@ -15,7 +19,6 @@ Architecture learnings:
   - Single attention layer performs nearly as well as multiple layers for this task
   - A single fully connected layer after attention is sufficient (removing additional FC layers showed no quality loss)
   - Larger datasets produce significantly better quality. For old hand-crafted pixel font, loss was ~0.002 with 5k, 0.000193 with 15k, and further improved with 25k samples.
-  - Indirect rendering via downsampled feature map and upsampling for better scalability
   - For grayscale output, standard MSE loss works better than focal or custom losses
   - Clamped linear output (replacing sigmoid) provides sharper gradients for training
   - Early stopping based on validation helps prevent overfitting (confirmed)
@@ -28,12 +31,9 @@ Architecture learnings:
   - (FP16) was tested and produced same quality outputs as FP32, but added implementation complexity
 
 Architecture improvements:
-  - Replaced large FC layer with smaller FC + convolution + pixel shuffle upsampling
-  - FC layer outputs downsampled feature map (reducing parameters by ~75%)
-  - Single convolution expands features for pixel shuffle upsampling
+  - Simplified FC layer architecture outputs feature map directly at full resolution
   - Clamped linear output (instead of sigmoid) provides sharper gradients
   - Grayscale rendering preserves antialiasing in the font output
-  - Architecture scales better to larger image dimensions
 
 Challenging patterns requiring special attention:
   - Sequences of repeating characters (e.g., "IIIIIIIIIIII" or "WWWWWWWWWWWW")
@@ -41,17 +41,15 @@ Challenging patterns requiring special attention:
 Performance optimizations:
   - Hardware acceleration with MPS (Metal Performance Shaders) gives ~60% speedup on M-series Macs
   - Optimal batch sizes (256 for CPU/MPS, 1024 for GPU) improve training efficiency
-  - Increased learning rate (from 0.0005 to 0.004) speeds up training with the new architecture
-  - Doubled dataset size (50k samples) for better generalization
-  - Reduced parameter count (~75% reduction in FC layer) enables faster training
   - Memory-efficient architecture allows training on higher resolution outputs
   - Training time significantly reduced with these optimizations
 
 These observations are based on experimentation with this specific task and dataset.
 Different font styles or character sets might require different approaches.
 
-The model supports sheet-based rendering with dimensions defined in generate_font.py
-without any upsampling, producing output at native resolution.
+The model supports sheet-based rendering with fixed dimensions (SHEET_HEIGHT, SHEET_WIDTH)
+without any upsampling, producing output at native resolution. Helper functions for
+rendering, data loading, and model persistence have been moved to helpers.py.
 """
 
 import torch
@@ -73,7 +71,7 @@ import datetime
 OUTPUT_DIR = "train_output_" + datetime.datetime.now().strftime("%m_%d_%H_%M_%S")
 
 # Training hyperparameters
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 10000
 LEARNING_RATE = 0.001
 EARLY_STOPPING_PATIENCE = 70
 VALIDATION_SPLIT = 0.2
