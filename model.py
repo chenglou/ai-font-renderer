@@ -203,7 +203,7 @@ class AttentionFontRenderer(nn.Module):
 
         return sheet
 
-# Use the generate_font module to create datasets
+# Dataset creation happens in generate_font.ts
 
 # Balanced training function with focal loss and moderate regularization
 def train_attention_model(model, dataset, batch_size):
@@ -371,7 +371,7 @@ def train_attention_model(model, dataset, batch_size):
         print(f"Training completed, Best Val Loss: {best_val_loss:.6f}")
 
     # Write training results to file
-    final_epoch = epoch + 1 if patience_counter < EARLY_STOPPING_PATIENCE else epoch - patience_counter
+    final_epoch = epoch + 1 if patience_counter < EARLY_STOPPING_PATIENCE else epoch
     with open(f"{OUTPUT_DIR}/training_results.txt", "w") as results_file:
         results_file.write(f"# Training Results\n")
         results_file.write(f"final_epoch = {final_epoch}\n")
